@@ -1,0 +1,6 @@
+{
+  "name": "Danbooru Ephemeral HTTP/2 Wallpaper Suite",
+  "description": "Refactored Python & HTML multi-monitor wallpaper engine featuring curl_cffi HTTP/2 proxy streaming, Cloudflare DoH resolution, 4-way infinite scroll, orientation-matched fullscreen slideshow, and dark/light theme UI.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
