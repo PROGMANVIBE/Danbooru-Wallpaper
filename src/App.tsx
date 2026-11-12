@@ -15,6 +15,7 @@ import {
   Terminal,
   Wrench,
   AlertTriangle,
+  LayoutGrid,
 } from 'lucide-react';
 
 type FileKey = 'CHANGELOG.md' | 'README.md' | 'danbooru_service.py' | 'index.html' | 'project.json';
@@ -25,88 +26,118 @@ const FILE_LIST: { key: FileKey; path: string; label: string; desc: string }[] =
     key: 'CHANGELOG.md',
     path: '/updated_files/CHANGELOG.md',
     label: 'CHANGELOG.md',
-    desc: 'Concise GitHub Release changelog summarizing the ephemeral /media proxy, Hybrid HTTP/2 + DoH transport, new display modes, UI enhancements, and bug fixes.',
+    desc: 'v2.2.0 release notes covering the Mondrian vs. Rows toggle, removal of blurred sections in Rows mode, layout toggle freeze fix, background pre-rendering/pre-organization of the next Masonry switch, and the Windows Task Manager Resource Graph pop-out.',
   },
   {
     key: 'README.md',
     path: '/updated_files/README.md',
     label: 'README.md',
-    desc: 'Updated comprehensive documentation covering the ephemeral /media proxy, Hybrid HTTP/2 + DoH transport, 3 display modes (Scroll, Collage, Slideshow), Light/Dark mode, PyInstaller CLI build, and expanded Log Glossary.',
+    desc: 'Comprehensive documentation covering the 4 display modes (Scroll, Polaroid, Slideshow, Masonry with Mondrian ⇄ Rows), the Task Manager Resource Graph pop-out, Previous (◀) & Next (▶) search bar buttons, and anti-malware /media proxy.',
   },
   {
     key: 'danbooru_service.py',
     path: '/updated_files/danbooru_service.py',
     label: 'danbooru_service.py',
-    desc: 'Hybrid Transport Engine (curl_cffi HTTP/2 + automatic stdlib DoH/SNI fallback), PyInstaller --noconsole stdout guard, SetWindowLongPtrW fix, /media proxy, dynamic Display tab, Light/Dark mode, and Logs Glossary.',
+    desc: 'Updated service with the top-bar "📊 Resource Graph" Task Manager Performance pop-out (CPU, RAM, GPU telemetry across Python + WebView2), "Mondrian ⇄" / "Rows ⇄" toggle button, and single-flight async property synchronization eliminating cross-thread GUI freezes.',
   },
   {
     key: 'index.html',
     path: '/updated_files/index.html',
     label: 'index.html',
-    desc: 'WebView2 frontend routing all img/video traffic through local /media proxy, dynamic LOCAL_ORIGIN resolution, 4-way scroll, and orientation-matched fullscreen slideshow with anti-starvation pagination.',
+    desc: 'WebView2 frontend featuring Mondrian vs. Rows (with all blurred sections removed in Rows mode), background pre-rendering & pre-organization of the next media switch 1.2s before flip initiation, 1280px bounded texture downscaling with zero memory bloat, and group re-indexing.',
   },
   {
     key: 'project.json',
     path: '/updated_files/project.json',
     label: 'project.json',
-    desc: 'Wallpaper schema with 4-way scroll directions (left, right, up, down), Fullscreen Slideshow mode, fade transition (0–10 [0s–1s]), and slide duration (0–600s).',
+    desc: 'Wallpaper configuration schema updated with Masonry Layout options relabeled to "Mondrian" (mondrian) and "Rows" (rows), plus Tile Count (4–36), Gap (0–10 px), and Delay (1–60 s).',
   },
 ];
 
-const AUDIT_ITEMS = [
+const SECURITY_AUDIT_ITEMS = [
   {
-    id: 'ERR-01',
-    severity: 'CRITICAL (Reported Crash)',
-    file: 'danbooru_service.py (Line 49)',
-    issue: "ModuleNotFoundError: No module named 'curl_cffi' on executable startup",
+    id: 'SEC-01',
+    severity: 'CRITICAL (Malware / Disguised Payload Prevention)',
+    file: 'danbooru_service.py (verify_media_magic_bytes & /media proxy)',
+    issue: 'Blind trust in upstream Content-Type header & lack of binary magic-byte header verification',
     cause:
-      'Top-level unguarded import `from curl_cffi import requests as curl_requests` crashed immediately when the Python environment used to run PyInstaller did not have curl_cffi installed or when its native libcurl CFFI binary extensions were omitted from the bundle.',
-    fix: 'Wrapped `curl_cffi` import in a guarded `try/except ImportError` and engineered a complete standard-library fallback (`DoHSNIHTTPSConnection`, `DoHSNIHTTPSHandler`, `StdlibDoHSession`) that connects TCP sockets directly to Cloudflare DoH-resolved IPs while passing `server_hostname=target_host` for TLS 1.3 SNI and certificate verification.',
+      'Previously, the local `/media` proxy forwarded `resp.headers.get("Content-Type")` from the upstream CDN without inspecting the initial binary bytes of the downloaded stream. If a compromised CDN node, rogue redirect, or polyglot upload served a PHP script (`<?php`), HTML/SVG script (`<script>`), Windows PE executable (`MZ`), or ZIP/PHAR archive (`PK\\x03\\x04`) disguised with a `.jpg` or `.mp4` extension, raw bytes would stream into the WebView2 process.',
+    fix: 'Implemented `verify_media_magic_bytes(header_bytes, is_range_continuation=False)` on the first chunk of every `/media` stream (including HTTP 206 Range continuation support for MP4 scrubbing/looping). Every file must match strict binary magic signatures for JPEG (`FF D8 FF`), PNG (`89 50 4E 47`), GIF (`GIF87a`/`GIF89a`), WEBP (`RIFF....WEBP`), or ISO-BMFF MP4 (`ftyp`/`moov`/`mdat`). Any stream containing `<?php`, `<script`, `<!doctype html`, `MZ`, `\\x7fELF`, or `PK\\x03\\x04` is immediately aborted and logged under `[SECURITY]`.',
   },
   {
-    id: 'ERR-02',
-    severity: 'HIGH',
-    file: 'danbooru_service.py',
-    issue: 'Circular dependency & DNS poisoning risk in resolve_hostname_doh()',
+    id: 'SEC-02',
+    severity: 'HIGH (PHP & Double-Extension Filtering)',
+    file: 'danbooru_service.py (validate_safe_media_url)',
+    issue: 'Insufficient URL path validation against `.php` scripts, double extensions, and path traversal',
     cause:
-      'Previously, `resolve_hostname_doh()` called `get_http2_session()` and connected to `https://cloudflare-dns.com/dns-query` via system DNS, which risked ISP DNS blocking on `cloudflare-dns.com` or recursion during session initialization.',
-    fix: 'Implemented `_query_cloudflare_doh_direct()` which connects a raw TLS 1.3 socket directly to Cloudflare anycast IPs (`1.1.1.1` / `1.0.0.1` port 443) with `server_hostname="cloudflare-dns.com"`, bypassing system DNS completely.',
+      'Previously, `fill_post_buffer()` checked `item.get("file_ext")` or `.endswith()`, which did not inspect the full URL path or query string for double extensions (e.g., `payload.php.jpg`, `image.jpg/.php`), executable extensions (`.exe`, `.bat`, `.ps1`, `.scr`, `.hta`), or path traversal sequences (`..`, `%00`).',
+    fix: 'Implemented `validate_safe_media_url(media_url, ext_hint)` enforced at both `/posts.json` ingestion and `/media` request handling. Enforces `SAFE_MEDIA_PATH_RE` (`^/[A-Za-z0-9/_\\-\\.~%]+\\.(jpg|jpeg|png|webp|gif|mp4)$`), blocks all `FORBIDDEN_URL_TOKENS` (`.php`, `.phtml`, `.phar`, `.exe`, `.bat`, `.ps1`, `.scr`, `.hta`, `.svg`, `.html`, `..`), and verifies that `file_ext` metadata matches the URL path extension.',
   },
   {
-    id: 'ERR-03',
-    severity: 'HIGH',
-    file: 'danbooru_service.py',
-    issue: 'PyInstaller --noconsole / --windowed crash on print()',
+    id: 'SEC-03',
+    severity: 'HIGH (Drive-By Download & MIME-Sniffing Prevention)',
+    file: 'danbooru_service.py & index.html',
+    issue: 'Missing Content-Disposition: inline, X-Content-Type-Options: nosniff, and Content-Security-Policy',
     cause:
-      'When packaged with PyInstaller `--noconsole` (`-w`), `sys.stdout` and `sys.stderr` are `None` on Windows. Unchecked `print()` calls in `log_event()` or `init_persistent_storage()` can raise `AttributeError` or `OSError: [Errno 9] Bad file descriptor`.',
-    fix: 'Added `safe_console_print(msg)` which checks `if sys.stdout is not None` and wraps `print(..., flush=True)` in a `try/except Exception` block.',
+      'Without explicit anti-sniffing and disposition headers on `/` and `/media`, a browser engine could MIME-sniff a malformed stream or trigger a file download dialog onto the host computer.',
+    fix: 'Hardcoded `Content-Type` strictly from the verified magic-byte signature (never from upstream headers) and forced `Content-Disposition: inline`, `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Cross-Origin-Resource-Policy: same-origin`, and a strict `Content-Security-Policy` (`default-src \'self\'; script-src \'self\' \'unsafe-inline\'; object-src \'none\'; frame-src \'none\'`) across both HTTP responses and `index.html`.',
   },
   {
-    id: 'ERR-04',
-    severity: 'MEDIUM',
-    file: 'danbooru_service.py',
-    issue: 'Win32 SetWindowLongPtrW 32-bit fallback bug',
+    id: 'SEC-04',
+    severity: 'MEDIUM (Open Redirect & SSRF Hardening)',
+    file: 'danbooru_service.py (HybridDoHSession.get)',
+    issue: 'Unchecked upstream HTTP redirects in curl_cffi and urllib transport sessions',
     cause:
-      '`SetWindowLongPtrW = getattr(user32, "SetWindowLongPtrW", user32.GetWindowLongW)` mistakenly fell back to `GetWindowLongW` instead of `SetWindowLongW` on 32-bit Python builds.',
-    fix: 'Corrected fallback to `getattr(user32, "SetWindowLongPtrW", user32.SetWindowLongW)`.',
+      '`curl_cffi` and `urllib.request.build_opener` follow `301/302/307/308` redirects automatically by default. If an upstream URL returned a redirect to an external untrusted domain, the client would follow it outside `ALLOWED_MEDIA_HOSTS`.',
+    fix: 'Disabled automatic redirects (`allow_redirects=False` and `NoRedirectHandler`) and implemented a manual hop-by-hop redirect loop (max 3 hops) inside `HybridDoHSession.get()` that validates every `Location` target against `https://` and `ALLOWED_MEDIA_HOSTS` (`danbooru.donmai.us`, `cdn.donmai.us`) before connecting.',
   },
   {
-    id: 'ERR-05',
-    severity: 'MEDIUM',
-    file: 'index.html',
-    issue: 'Slideshow orientation filter starvation on single-orientation batches',
+    id: 'SEC-05',
+    severity: 'MEDIUM (Resource Exhaustion & WebView2 Sandboxing)',
+    file: 'danbooru_service.py (MAX_IMAGE_FILE_SIZE_BYTES & WebView2 flags)',
+    issue: 'Unbounded stream size on non-MP4 media & WebView2 filesystem exposure',
     cause:
-      'In Fullscreen Slideshow mode, if an entire `/api` batch contained only opposite-orientation posts (e.g. 40 portrait images on a 16:9 landscape monitor), `filtered` was empty and the slideshow waited until the next user interaction or slow backoff.',
-    fix: 'Added automatic fast follow-up pagination (`setTimeout(() => fetchNextPage(), 420)`) whenever `filtered.length === 0` in `slideshow` mode, plus dynamic `LOCAL_ORIGIN` resolution.',
+      'While MP4 files were capped at 15 MB, static/animated image streams had no upper byte cap during chunked streaming, allowing a crafted multi-gigabyte stream to exhaust memory.',
+    fix: 'Enforced `MAX_IMAGE_FILE_SIZE_BYTES = 25 * 1024 * 1024` (25 MB) across both `Content-Length` pre-checks and real-time chunk streaming in `/media`, added `--disable-file-system` to WebView2 Chromium flags, and blocked `dragover`/`drop`/`contextmenu` navigation in `index.html`.',
+  },
+];
+
+const FEATURE_SUMMARY_ITEMS = [
+  {
+    id: 'FEAT-01',
+    severity: 'CRITICAL BUG FIX (Fatal Freeze on >3 Layout Toggles)',
+    file: 'danbooru_service.py & index.html',
+    issue: 'Cross-Thread Win32 & WebView2 IPC Deadlock When Toggling Between Mondrian and Rows (>3 Times)',
+    cause:
+      'Clicking the Masonry layout toggle button called `push_properties_to_webview(sid)` synchronously on the Tkinter UI thread, which ran blocking Win32 `SetWindowPos(..., SWP_FRAMECHANGED)`, `SendMessageW(WM_SIZE)`, and `RedrawWindow(..., RDW_UPDATENOW)` calls on the WebView2 HWND followed by a synchronous `win.evaluate_js(...)` semaphore wait and a redundant `window.dispatchEvent(new Event(\'resize\'))`. Rapidly toggling >3 times deadlocked the Tkinter GUI thread against the WebView2 WinForms UI thread with zero Python exceptions or log messages. In addition, `solveAspectLockedSubtree()` in `index.html` reordered `masonryGroups` when `numGroups >= 3` without re-indexing `group.index` and `tile.groupIndex`.',
+    fix: 'Replaced synchronous property pushes with a coalesced single-flight background worker (`_property_push_worker`), restricted Win32 geometry sync strictly to screen `enabled` state changes with `SWP_ASYNCWINDOWPOS = 0x4000`, added `prop_seq` in `/epoch` as a lock-free poll fallback, removed the redundant `resize` dispatch, and re-indexed `masonryGroups` after BSP solving.',
   },
   {
-    id: 'ERR-06',
-    severity: 'CRITICAL (Runtime Request Error & Fallback Bypass)',
-    file: 'danbooru_service.py',
-    issue: "Fetch error: Session.request() got an unexpected keyword argument 'curl_options' & Fallback Did Not Trigger",
+    id: 'FEAT-02',
+    severity: 'PERFORMANCE & VISUAL UPDATE',
+    file: 'index.html, danbooru_service.py, project.json',
+    issue: 'Removed Blurred Sections in Rows Mode, Relabeled Mondrian vs. Rows & Pre-Staged Next Masonry Switch Without Memory Bloat',
     cause:
-      "1) In curl_cffi, `curl_options` is a Session.__init__() argument (stored on `session._curl_options`), NOT a per-request keyword argument on `Session.get()` / `Session.request()`. Passing `curl_options` to `sess.get()` raised a `TypeError`. 2) The fallback did not trigger because `rebuild_http2_session()` only caught exceptions during `import curl_cffi` and `Session()` initialization. Once `Session()` succeeded, `HTTP2_SESSION` was a raw `curl_cffi.requests.Session` object—so request-time errors inside `sess.get()` escaped directly to `fill_post_buffer()`'s retry loop instead of switching to `StdlibDoHSession`.",
-    fix: 'Created `HybridDoHSession`, which wraps both `curl_cffi.requests.Session` and `StdlibDoHSession`. Removed `curl_options` from `sess.get()`, applied `CURLOPT_RESOLVE` directly onto `session._curl_options`, and added a request-time try/except fallback inside `HybridDoHSession.get()` that immediately switches to `StdlibDoHSession` on any curl_cffi runtime error without failing the request.',
+      'User requested removing the blurred/ambient sections when the Google Photos (Rows) option is selected, relabeling the toggle button and config to "Mondrian" vs. "Rows", and implementing background pre-rendering/pre-organization of the next media switch while preventing continuous memory bloat.',
+    fix: 'Added `#stage.rows-mode` CSS and JS guards so `Rows` mode removes all ambient/blurred backgrounds (`background-image: none`) and fills each justified row tile (`object-fit: cover`). Relabeled the toggle button and schema to `Mondrian` (`mondrian`) vs. `Rows` (`rows`). Implemented `preStageNextMasonrySwitch()` + `precomputeGroupReflowPlan()` 1.2s prior to flip initiation to pre-decode the next media node in a single hidden `.masonry-prestage-slot` and pre-calculate all FLIP matrices ahead of time, paired with 1280px static image downscaling on a reusable 1×1-reset canvas and immediate Blob URL revocation.',
+  },
+  {
+    id: 'FEAT-03',
+    severity: 'NEW TELEMETRY POP-OUT & 100% SYSTEM RAM SCALING',
+    file: 'danbooru_service.py (AppResourceMonitor & ResourceGraphDialog)',
+    issue: 'Windows Task Manager Performance-Style "Resource Graph" Pop-Out with True 0%–100% Total Physical RAM Scaling',
+    cause:
+      'User requested a "Resource Graph" pop-out styled like Windows Task Manager Performance graphs, and reported that the Memory graph previously scaled against a 4096 MB dynamic ceiling—making 6.9% RAM usage (2215.2 MB of 32 GB) look like ~70% utilization.',
+    fix: 'Added the `📊 Resource Graph` button in `SettingsDialog` and updated `ResourceGraphDialog` so the Memory graph (in the left sidebar mini sparkline, single Memory view, and All Graphs 3x stacked view) plots `ram_pct_history` against `100.0` (0%–100% of total physical system memory) so 6.9% RAM usage renders at its true 6.9% vertical height.',
+  },
+  {
+    id: 'FEAT-04',
+    severity: 'HIGH-STRESS STABILITY FIX (36-Tile Masonry Rapid Next Clicks)',
+    file: 'danbooru_service.py & index.html',
+    issue: 'Prevent Application Freeze & ~50% GPU Spike When Rapidly Clicking "Next" in 36-Tile Masonry Mode',
+    cause:
+      'Pressing "Next" (~6 times/sec) with 36 Masonry tiles spawned dozens of concurrent `_async_evaluate_js` threads in Python and bypassed `busyGroups` in `triggerNextMasonryFlip(true)`, launching overlapping 3D GPU card flips, mid-reflow geometry recalculations, and concurrent scratch-canvas downscales.',
+    fix: 'Implemented a 1.0-second internal cooldown (`NAV_BUTTON_COOLDOWN_SEC = 1.0` in Python with button visual state + `MANUAL_NAV_COOLDOWN_MS = 1000` in JS), replaced per-call thread spawning in `_async_evaluate_js` with a single-flight queue worker (`_js_eval_worker`), added `isAnyMasonryTileBusy()` so strictly 1 tile flips/reflows at a time, serialized `downscaleScratchCanvas`, and capped steady-state `readyImageQueue` to 10 items once all 36 tiles are populated.',
   },
 ];
 
@@ -172,11 +203,11 @@ export default function App() {
       >
         <div>
           <h1 className="text-base font-bold tracking-tight flex items-center gap-2">
-            <FileCode className="w-5 h-5 text-blue-500" />
-            Danbooru Ephemeral HTTP/2 Wallpaper Suite — Crash Fix & Codebase Audit
+            <LayoutGrid className="w-5 h-5 text-blue-500" />
+            Danbooru Wallpaper Suite v2.1 — Polaroid, Masonry, Queue Controls & Security Hardening
           </h1>
           <p className={`text-xs mt-0.5 ${isDark ? 'text-zinc-400' : 'text-zinc-600'}`}>
-            Hybrid Transport (curl_cffi HTTP/2 + Stdlib DoH/SNI Fallback) • PyInstaller --onefile --noconsole Ready
+            4 Display Modes (Scroll • Polaroid • Slideshow • Masonry) • Prev/Next Search Controls • Anti-Malware Binary Magic-Byte Proxy
           </p>
         </div>
 
@@ -197,7 +228,7 @@ export default function App() {
               }`}
             >
               <FileCode className="w-3.5 h-3.5" />
-              Updated Source Files (4)
+              Updated Source Files ({FILE_LIST.length})
             </button>
             <button
               onClick={() => setActiveTab('audit')}
@@ -210,7 +241,7 @@ export default function App() {
               }`}
             >
               <ShieldCheck className="w-3.5 h-3.5" />
-              Codebase Audit & Fixes ({AUDIT_ITEMS.length})
+              Security Audit & Feature Report ({SECURITY_AUDIT_ITEMS.length + FEATURE_SUMMARY_ITEMS.length})
             </button>
             <button
               onClick={() => setActiveTab('build')}
@@ -244,7 +275,7 @@ export default function App() {
       {activeTab === 'code' && (
         <div className="flex-1 flex flex-col lg:flex-row overflow-hidden">
           <aside
-            className={`w-full lg:w-80 border-b lg:border-b-0 lg:border-r p-4 flex flex-col gap-3 ${
+            className={`w-full lg:w-80 border-b lg:border-b-0 lg:border-r p-4 flex flex-col gap-3 overflow-y-auto ${
               isDark ? 'border-zinc-800 bg-[#101015]' : 'border-zinc-300 bg-zinc-50'
             }`}
           >
@@ -304,13 +335,19 @@ export default function App() {
             >
               <div className="font-semibold flex items-center gap-1.5 text-emerald-500">
                 <Wrench className="w-3.5 h-3.5" />
-                Zero-Crash Hybrid Transport
+                Verified Security & Feature Updates
               </div>
               <div>
-                • Automatically uses <code className="font-mono">curl_cffi</code> HTTP/2 Chrome impersonation when installed.
+                • <strong>Polaroid</strong> rename applied across all UI controls, properties, and documentation.
               </div>
               <div>
-                • Seamlessly falls back to Python stdlib <code className="font-mono">DoHSNIHTTPSConnection</code> (Cloudflare 1.1.1.1 DoH + TLS 1.3 SNI) if <code className="font-mono">curl_cffi</code> is absent in the PyInstaller executable.
+                • <strong>Masonry</strong> mode with 4–36 tiles, 0–10px gap, 1–60s delay, 3D Y-flip, neighbor reflow, and full GIF/MP4 playthrough verification.
+              </div>
+              <div>
+                • <strong>Previous (◀) & Next (▶)</strong> vertical rectangle search bar buttons.
+              </div>
+              <div>
+                • <strong>Anti-Malware / PHP Inspection</strong> via binary magic-byte verification and strict URL path filtering.
               </div>
             </div>
           </aside>
@@ -356,24 +393,66 @@ export default function App() {
       )}
 
       {activeTab === 'audit' && (
-        <div className="flex-1 overflow-auto p-6 max-w-5xl mx-auto w-full space-y-4">
+        <div className="flex-1 overflow-auto p-6 max-w-5xl mx-auto w-full space-y-6">
           <div
             className={`p-4 rounded border ${
               isDark ? 'border-zinc-800 bg-[#121218]' : 'border-zinc-300 bg-white'
             }`}
           >
             <h2 className="text-sm font-bold flex items-center gap-2">
-              <AlertTriangle className="w-4 h-4 text-amber-500" />
-              Diagnostic & Codebase Audit Report
+              <ShieldCheck className="w-4 h-4 text-emerald-500" />
+              PHP & Malware Download Vulnerability Audit (SEC-01 through SEC-05)
             </h2>
             <p className={`text-xs mt-1 ${isDark ? 'text-zinc-400' : 'text-zinc-600'}`}>
-              All 5 potential runtime and packaging issues across <code className="font-mono">danbooru_service.py</code>,{' '}
-              <code className="font-mono">index.html</code>, and <code className="font-mono">project.json</code> have been resolved.
+              Comprehensive security scan and remediation across <code className="font-mono">danbooru_service.py</code> and{' '}
+              <code className="font-mono">index.html</code> to ensure a pulled file can never download or execute PHP payloads, scripts, or malware on the host machine.
             </p>
           </div>
 
           <div className="space-y-3">
-            {AUDIT_ITEMS.map((item) => (
+            {SECURITY_AUDIT_ITEMS.map((item) => (
+              <div
+                key={item.id}
+                className={`p-4 rounded border space-y-2 ${
+                  isDark ? 'border-zinc-800 bg-[#101015]' : 'border-zinc-300 bg-white'
+                }`}
+              >
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <span className="font-mono text-xs font-bold px-2 py-0.5 rounded bg-emerald-600/20 text-emerald-400 border border-emerald-500/30">
+                      {item.id}
+                    </span>
+                    <span className="font-semibold text-sm">{item.issue}</span>
+                  </div>
+                  <span className="font-mono text-xs text-zinc-400">{item.file}</span>
+                </div>
+                <div className={`text-xs space-y-1.5 ${isDark ? 'text-zinc-300' : 'text-zinc-700'}`}>
+                  <div>
+                    <span className="font-bold text-amber-500">Vulnerability Found: </span>
+                    {item.cause}
+                  </div>
+                  <div>
+                    <span className="font-bold text-emerald-500">Remediation Implemented: </span>
+                    {item.fix}
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <div
+            className={`p-4 rounded border ${
+              isDark ? 'border-zinc-800 bg-[#121218]' : 'border-zinc-300 bg-white'
+            }`}
+          >
+            <h2 className="text-sm font-bold flex items-center gap-2">
+              <AlertTriangle className="w-4 h-4 text-blue-500" />
+              Feature & Display Mode Implementation Summary
+            </h2>
+          </div>
+
+          <div className="space-y-3">
+            {FEATURE_SUMMARY_ITEMS.map((item) => (
               <div
                 key={item.id}
                 className={`p-4 rounded border space-y-2 ${
@@ -391,11 +470,11 @@ export default function App() {
                 </div>
                 <div className={`text-xs space-y-1.5 ${isDark ? 'text-zinc-300' : 'text-zinc-700'}`}>
                   <div>
-                    <span className="font-bold text-amber-500">Root Cause: </span>
+                    <span className="font-bold text-blue-400">Requirement: </span>
                     {item.cause}
                   </div>
                   <div>
-                    <span className="font-bold text-emerald-500">Implemented Fix: </span>
+                    <span className="font-bold text-emerald-500">Implementation: </span>
                     {item.fix}
                   </div>
                 </div>
@@ -433,7 +512,7 @@ export default function App() {
               <code>{PYINSTALLER_COMMANDS}</code>
             </pre>
             <p className={`text-xs leading-relaxed ${isDark ? 'text-zinc-400' : 'text-zinc-600'}`}>
-              Note: Even if you build the executable without <code className="font-mono">--collect-all &quot;curl_cffi&quot;</code> or on a machine without <code className="font-mono">curl_cffi</code> installed, the updated <code className="font-mono">danbooru_service.py</code> will no longer crash—it will automatically run using the built-in <code className="font-mono">StdlibDoHSession</code> (Cloudflare 1.1.1.1 DoH + TLS 1.3 SNI).
+              Note: Even if you build the executable without <code className="font-mono">--collect-all &quot;curl_cffi&quot;</code> or on a machine without <code className="font-mono">curl_cffi</code> installed, the updated <code className="font-mono">danbooru_service.py</code> will automatically run using the built-in <code className="font-mono">StdlibDoHSession</code> (Cloudflare 1.1.1.1 DoH + TLS 1.3 SNI).
             </p>
           </div>
         </div>

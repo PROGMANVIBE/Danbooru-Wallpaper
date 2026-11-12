@@ -27,9 +27,11 @@ os.environ.setdefault(
     "--disable-sync "
     "--disable-translate "
     "--disable-extensions "
+    "--disable-file-system "
     "--disable-background-networking",
 )
 
+import re
 import urllib.request
 import urllib.parse
 import urllib.error
@@ -226,6 +228,7 @@ SWP_NOACTIVATE = 0x0010
 SWP_FRAMECHANGED = 0x0020
 SWP_SHOWWINDOW = 0x0040
 SWP_HIDEWINDOW = 0x0080
+SWP_ASYNCWINDOWPOS = 0x4000
 
 HWND_TOP = 0
 HWND_BOTTOM = 1
@@ -485,9 +488,12 @@ def resize_webview_child_containers(hwnd, screen_w, screen_h):
             ):
                 user32.SetWindowPos(
                     child_hwnd, 0, 0, 0, screen_w, screen_h,
-                    SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED
+                    SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED | SWP_ASYNCWINDOWPOS
                 )
-                user32.SendMessageW(child_hwnd, WM_SIZE, SIZE_RESTORED, lparam_size)
+                user32.SendMessageTimeoutW(
+                    child_hwnd, WM_SIZE, SIZE_RESTORED, lparam_size,
+                    SMTO_NORMAL, 150, ctypes.byref(ctypes.c_size_t(0))
+                )
         return True
 
     child_cb = WNDENUMPROC(_resize_child)
@@ -497,6 +503,7 @@ def resize_webview_child_containers(hwnd, screen_w, screen_h):
 def sync_all_screens_z_order_and_geometry(target_screen_id=None):
     """
     Synchronizes geometry, visibility, and desktop Z-order across ALL attached monitor HWNDs.
+    Uses SWP_ASYNCWINDOWPOS to prevent cross-thread Win32 GUI deadlocks between Tkinter and WebView2.
     """
     with INJECTION_LOCK:
         progman = user32.FindWindowW("Progman", None)
@@ -537,16 +544,16 @@ def sync_all_screens_z_order_and_geometry(target_screen_id=None):
                 if target_screen_id is None or target_screen_id == sid:
                     user32.SetWindowPos(
                         hwnd, insert_after, pt.x, pt.y, screen_w - 1, screen_h - 1,
-                        SWP_NOACTIVATE | SWP_FRAMECHANGED | SWP_SHOWWINDOW
+                        SWP_NOACTIVATE | SWP_FRAMECHANGED | SWP_SHOWWINDOW | SWP_ASYNCWINDOWPOS
                     )
                 user32.SetWindowPos(
                     hwnd, insert_after, pt.x, pt.y, screen_w, screen_h,
-                    SWP_NOACTIVATE | SWP_FRAMECHANGED | SWP_SHOWWINDOW
+                    SWP_NOACTIVATE | SWP_FRAMECHANGED | SWP_SHOWWINDOW | SWP_ASYNCWINDOWPOS
                 )
                 resize_webview_child_containers(hwnd, screen_w, screen_h)
                 user32.RedrawWindow(
                     hwnd, None, None,
-                    RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN | RDW_FRAME
+                    RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_FRAME
                 )
                 insert_after = hwnd
             else:
@@ -554,7 +561,7 @@ def sync_all_screens_z_order_and_geometry(target_screen_id=None):
                 SetWindowLongPtrW(hwnd, GWL_STYLE, LONG_PTR(style))
                 user32.SetWindowPos(
                     hwnd, 0, pt.x, pt.y, screen_w, screen_h,
-                    SWP_NOZORDER | SWP_NOACTIVATE | SWP_HIDEWINDOW
+                    SWP_NOZORDER | SWP_NOACTIVATE | SWP_HIDEWINDOW | SWP_ASYNCWINDOWPOS
                 )
 
         if topo["is_win11_24h2"] and topo["workerw_in_progman"]:
@@ -562,7 +569,7 @@ def sync_all_screens_z_order_and_geometry(target_screen_id=None):
                 topo["workerw_in_progman"],
                 wintypes.HWND(HWND_BOTTOM),
                 0, 0, 0, 0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS
             )
 
 
@@ -774,6 +781,43 @@ def get_default_properties_dict():
             "step": 1,
             "value": 10,
         },
+        "masonrylayout": {
+            "order": 11,
+            "text": "Masonry Layout",
+            "type": "combo",
+            "value": "mondrian",
+            "options": [
+                {"label": "Mondrian", "value": "mondrian"},
+                {"label": "Rows", "value": "rows"},
+            ],
+        },
+        "masonrytiles": {
+            "order": 12,
+            "text": "Tile Count (4 – 36)",
+            "type": "slider",
+            "min": 4,
+            "max": 36,
+            "step": 1,
+            "value": 12,
+        },
+        "masonrygap": {
+            "order": 13,
+            "text": "Gap (0 – 10 px)",
+            "type": "slider",
+            "min": 0,
+            "max": 10,
+            "step": 1,
+            "value": 4,
+        },
+        "masonrydelay": {
+            "order": 14,
+            "text": "Delay (1 – 60 s)",
+            "type": "slider",
+            "min": 1,
+            "max": 60,
+            "step": 1,
+            "value": 5,
+        },
     }
 
 
@@ -783,7 +827,7 @@ DEFAULT_PROJECT_SCHEMA = {
         "properties": get_default_properties_dict()
     },
     "screens": {},
-    "title": "Danbooru Infinite Scroll, Polaroid Collage & Fullscreen Slideshow",
+    "title": "Danbooru Infinite Scroll, Polaroid, Fullscreen Slideshow & Masonry",
     "type": "web",
     "version": 2,
 }
@@ -831,7 +875,32 @@ MIN_API_INTERVAL = 2.0
 
 # Max MP4 file size allowed through API metadata & Proxy stream (15 MB = 15,728,640 bytes)
 MAX_MP4_FILE_SIZE_BYTES = 15 * 1024 * 1024
+# Max static/animated image stream size allowed through Proxy stream (25 MB)
+MAX_IMAGE_FILE_SIZE_BYTES = 25 * 1024 * 1024
 ALLOWED_EXTENSIONS = {"jpg", "jpeg", "png", "webp", "gif", "mp4"}
+
+# Strict path pattern: must end with a single allowed extension and contain no path traversal or executable/PHP tokens
+SAFE_MEDIA_PATH_RE = re.compile(r"^/[A-Za-z0-9/_\-\.~%]+\.(jpg|jpeg|png|webp|gif|mp4)$", re.IGNORECASE)
+FORBIDDEN_URL_TOKENS = (
+    ".php", ".phtml", ".php3", ".php4", ".php5", ".php7", ".phps", ".phar", ".inc",
+    ".exe", ".dll", ".bat", ".cmd", ".ps1", ".vbs", ".wsf", ".scr", ".msi", ".com",
+    ".hta", ".jar", ".py", ".sh", ".svg", ".html", ".htm", ".xhtml", ".js", ".jsp", ".asp", ".aspx",
+    "..", "%2e%2e", "%00", "\x00",
+)
+
+# Forbidden payload prefixes/signatures that must never appear in a media stream
+FORBIDDEN_PAYLOAD_SIGNATURES = (
+    b"<?php",
+    b"<?=",
+    b"<html",
+    b"<!doctype html",
+    b"<script",
+    b"<svg",
+    b"MZ",              # Windows PE executable / DLL header
+    b"\x7fELF",         # Linux ELF binary
+    b"PK\x03\x04",      # ZIP / JAR / PHAR archive header
+    b"Rar!\x1a\x07",    # RAR archive
+)
 
 ALLOWED_MEDIA_HOSTS = {
     "danbooru.donmai.us",
@@ -842,6 +911,115 @@ ALLOWED_LOCAL_ORIGINS = {
     f"http://127.0.0.1:{PORT}",
     f"http://localhost:{PORT}",
 }
+
+
+def validate_safe_media_url(media_url: str, ext_hint: str = "") -> tuple[bool, str, str]:
+    """
+    Validates that a candidate media URL points strictly to an allowed HTTPS Danbooru CDN host,
+    contains no PHP/executable double extensions or path traversal tokens, and ends in a clean
+    whitelisted media extension.
+    Returns (is_valid, normalized_ext, reason_if_invalid).
+    """
+    if not media_url or not isinstance(media_url, str):
+        return False, "", "Empty media URL"
+    try:
+        parsed = urllib.parse.urlparse(media_url.strip())
+    except Exception:
+        return False, "", "Malformed URL"
+
+    if parsed.scheme != "https":
+        return False, "", f"Disallowed scheme '{parsed.scheme}'"
+
+    hostname = (parsed.hostname or "").lower()
+    if hostname not in ALLOWED_MEDIA_HOSTS:
+        return False, "", f"Unauthorized host '{hostname}'"
+
+    raw_path = urllib.parse.unquote(parsed.path or "")
+    lower_path = raw_path.lower()
+    lower_query = urllib.parse.unquote(parsed.query or "").lower()
+
+    for token in FORBIDDEN_URL_TOKENS:
+        if token in lower_path or token in lower_query:
+            return False, "", f"Forbidden path/query token '{token}' detected"
+
+    if not SAFE_MEDIA_PATH_RE.match(parsed.path or ""):
+        return False, "", "URL path does not match strict single-extension media pattern"
+
+    path_ext = lower_path.rsplit(".", 1)[-1] if "." in lower_path else ""
+    if path_ext not in ALLOWED_EXTENSIONS:
+        return False, "", f"Disallowed path extension '.{path_ext}'"
+
+    norm_hint = str(ext_hint or "").lower().lstrip(".")
+    if norm_hint and norm_hint not in ALLOWED_EXTENSIONS:
+        return False, "", f"Disallowed file_ext metadata '.{norm_hint}'"
+
+    if norm_hint and norm_hint != path_ext:
+        # Allow jpg/jpeg equivalence
+        if not ({norm_hint, path_ext} <= {"jpg", "jpeg"}):
+            return False, "", f"Extension mismatch between metadata ('.{norm_hint}') and URL path ('.{path_ext}')"
+
+    return True, path_ext, "OK"
+
+
+def verify_media_magic_bytes(header_bytes: bytes, is_range_continuation: bool = False) -> tuple[bool, str, str]:
+    """
+    Inspects the initial binary bytes of an upstream media response to verify authentic
+    JPEG, PNG, GIF87a/89a, WEBP, or ISO-BMFF MP4 magic signatures and block disguised
+    PHP scripts, HTML/SVG polyglots, or PE/archive binaries.
+    Returns (is_valid, canonical_mime_type, reason).
+    """
+    if not header_bytes:
+        return False, "", "Empty response stream"
+
+    head_probe = header_bytes[:512]
+    head_lower = head_probe.lower()
+
+    # Scan initial window for embedded PHP / HTML / Script polyglot tags
+    for sig in (b"<?php", b"<script", b"<!doctype html"):
+        if sig in head_lower:
+            return False, "", f"Malicious script/markup signature ({sig.decode('ascii', errors='ignore')}) detected in header"
+
+    if head_lower.lstrip().startswith((b"<?=", b"<html", b"<svg", b"<?xml")):
+        return False, "", "Disallowed markup/script prefix detected at start of stream"
+
+    if is_range_continuation:
+        return True, "video/mp4", "MP4-Range"
+
+    if len(header_bytes) < 8:
+        return False, "", "Insufficient header bytes (minimum 8 bytes required)"
+
+    # Check for PE / ELF / Archive executable headers right at byte 0
+    if head_probe.startswith(b"MZ"):
+        return False, "", "Windows PE executable ('MZ') header detected"
+    if head_probe.startswith(b"\x7fELF"):
+        return False, "", "ELF executable header detected"
+    if head_probe.startswith(b"PK\x03\x04"):
+        return False, "", "ZIP/PHAR archive header detected"
+    if head_probe.startswith(b"Rar!\x1a\x07"):
+        return False, "", "RAR archive header detected"
+
+    # 1. JPEG: FF D8 FF
+    if head_probe.startswith(b"\xff\xd8\xff"):
+        return True, "image/jpeg", "JPEG"
+
+    # 2. PNG: 89 50 4E 47 0D 0A 1A 0A
+    if head_probe.startswith(b"\x89PNG\r\n\x1a\n"):
+        return True, "image/png", "PNG"
+
+    # 3. GIF: GIF87a or GIF89a
+    if head_probe.startswith((b"GIF87a", b"GIF89a")):
+        return True, "image/gif", "GIF"
+
+    # 4. WEBP: RIFF....WEBP
+    if len(head_probe) >= 12 and head_probe[:4] == b"RIFF" and head_probe[8:12] == b"WEBP":
+        return True, "image/webp", "WEBP"
+
+    # 5. MP4 (ISO Base Media File Format): bytes 4..8 == b'ftyp' (or b'moov' / b'mdat' / b'wide' / b'free' / b'styp' / b'skip' / b'uuid')
+    if len(head_probe) >= 12 and head_probe[4:8] in (b"ftyp", b"moov", b"mdat", b"wide", b"free", b"styp", b"skip", b"uuid"):
+        return True, "video/mp4", "MP4"
+
+    return False, "", "Unrecognized binary magic-byte signature"
+
 
 CLOUDFLARE_DOH_ENDPOINT = "https://cloudflare-dns.com/dns-query"
 CLOUDFLARE_DOH_IPS = ("1.1.1.1", "1.0.0.1")
@@ -897,25 +1075,32 @@ LOG_GLOSSARY_ENTRIES = [
     ("[DOH]", "Cloudflare DNS-over-HTTPS (https://cloudflare-dns.com/dns-query via 1.1.1.1) hostname resolutions for danbooru.donmai.us and cdn.donmai.us."),
     ("[API]", "Authenticated requests sent to Danbooru's REST API (/posts.json) including page numbers, tags, and rate-limit fallbacks."),
     ("[FETCH]", "Background post buffer population, media deduplication, MP4 size filtering (>15 MB), and shuffling statistics."),
-    ("[PROXY]", "Binary media streaming (/media) over the authenticated transport pipeline, Range requests for video playback, and stream errors."),
+    ("[PROXY]", "Binary media streaming (/media) over the authenticated transport pipeline, magic-byte inspection, Range requests, and stream errors."),
     ("[AUTH]", "Credential loading, DPAPI encryption/decryption status, active transport engine (curl_cffi vs. stdlib DoH+SNI), and HTTP Basic Auth updates."),
     ("[CONFIG]", "Reading and writing persistent configuration files (config.json, project.json, saved_searches.json) in %APPDATA%."),
     ("[UI]", "Floating Search Bar, Application Settings window, Light/Dark mode theme switches, and lock/pause interactions."),
     ("[SEARCH]", "Tag queries queued from the search bar and saved/removed bookmark entries."),
     ("[SUGGEST]", "Live tag autocomplete queries executed against Danbooru's /tags.json endpoint."),
     ("[REFRESH]", "Immediate cache epoch increments triggered by pressing the refresh button or Shift+Enter."),
-    ("[WEBVIEW]", "Synchronization of per-screen display properties, modes (Scroll, Collage, Slideshow), and enabled states to WebView2."),
+    ("[NAV]", "Search bar Previous (◀) and Next (▶) media queue actions dispatched to active wallpaper monitors."),
+    ("[WEBVIEW]", "Synchronization of per-screen display properties, modes (Scroll, Polaroid, Slideshow, Masonry), and enabled states to WebView2."),
     ("[WIN32]", "Native Windows API desktop window attachment (Progman / WorkerW / SHELLDLL_DefView) and multi-monitor Z-order management."),
-    ("[COLLAGE]", "Collage mode actions such as triggering the 30-second cooldown Fill Screen burst."),
+    ("[POLAROID]", "Polaroid mode actions such as triggering the 30-second cooldown Fill Screen burst."),
     ("[APP]", "Application-wide master pause/resume state changes and clean shutdown sequences."),
     ("[PING]", "Periodic heartbeat summary confirming active WebView2 wallpaper clients are polling /epoch."),
-    ("[SECURITY]", "Localhost origin verification blocking unauthorized cross-origin or external browser requests."),
+    ("[SECURITY]", "Localhost origin verification, URL path/PHP filtering, redirect host pinning, and binary magic-byte signature enforcement."),
+    ("[PERF]", "Real-time CPU, RAM, and GPU telemetry events from the Resource Graph performance monitor."),
     ("[ERROR]", "Network timeouts, upstream HTTP errors, or unexpected exceptions with automatic exponential backoff."),
 ]
 
 CURRENT_TAGS = DEFAULT_TAGS
 CURRENT_PAGE = 1
 CACHE_EPOCH = 1
+NAV_SEQ = 0
+NAV_ACTION = ""
+NAV_BUTTON_COOLDOWN_SEC = 1.0
+LAST_NAV_TRIGGER_TIME = 0.0
+PROP_SEQ = 1
 
 MAX_SEEN_IDS = 1500
 SEEN_POST_IDS = set()
@@ -935,7 +1120,7 @@ LAST_API_CALL_TIME = 0.0
 NEXT_ALLOWED_FETCH_TIME = 0.0
 
 APP_PAUSED = False        # Master application pause (freezes display, stops proxy & API calls)
-WALLPAPER_PAUSED = False  # Search bar pause (pauses scrolling/collage/slideshow, keeps GIFs/MP4s playing)
+WALLPAPER_PAUSED = False  # Search bar pause (pauses scrolling/polaroid/slideshow/masonry, keeps GIFs/MP4s playing)
 
 EPOCH_POLL_COUNT = 0
 LAST_EPOCH_LOG_TIME = 0.0
@@ -951,11 +1136,20 @@ APP_INSTANCE = None
 HTTP_SERVER = None
 SETTINGS_DIALOG_INSTANCE = None
 GLOSSARY_DIALOG_INSTANCE = None
+RESOURCE_GRAPH_DIALOG_INSTANCE = None
 
 CONNECTED_SCREENS = enumerate_connected_monitors()
 WEBVIEW_WINDOWS = {}       # screen_id -> webview.Window
 DESKTOP_HWNDS = {}         # screen_id -> int HWND
 DESKTOP_INJECTED_SET = set()
+_PROP_PUSH_LOCK = threading.Lock()
+_PENDING_PROP_SCREENS = set()
+_PENDING_SYNC_GEOMETRY = False
+_PROP_PUSH_WORKER_ACTIVE = False
+_LAST_SCREEN_ENABLED_STATE = {}
+_JS_EVAL_LOCK = threading.Lock()
+_JS_EVAL_QUEUE = deque(maxlen=16)
+_JS_EVAL_WORKER_ACTIVE = False
 
 
 def log_event(category, message):
@@ -1395,46 +1589,79 @@ class HybridDoHSession:
         allow_redirects: bool = True,
     ):
         global CURL_CFFI_AVAILABLE
-        parsed = urllib.parse.urlparse(url)
-        target_host = (parsed.hostname or "").lower()
+        current_url = url
+        current_params = params
+        max_hops = 3 if allow_redirects else 0
 
-        self._stdlib_session.headers.update(self.headers)
-        self._stdlib_session.auth = self.auth
+        for _ in range(max_hops + 1):
+            parsed = urllib.parse.urlparse(current_url)
+            target_host = (parsed.hostname or "").lower()
+            if parsed.scheme != "https" or target_host not in ALLOWED_MEDIA_HOSTS:
+                raise PermissionError(f"Blocked outbound request to unauthorized host: {target_host}")
 
-        if self._curl_session is not None and CURL_CFFI_AVAILABLE:
-            try:
-                self._curl_session.headers.update(self.headers)
-                self._curl_session.auth = self.auth
-                self._apply_doh_to_curl_session(target_host)
+            self._stdlib_session.headers.update(self.headers)
+            self._stdlib_session.auth = self.auth
 
-                # Execute request via curl_cffi without 'curl_options' kwarg (not supported on Session.get)
-                return self._curl_session.get(
-                    url,
-                    params=params,
+            resp = None
+            if self._curl_session is not None and CURL_CFFI_AVAILABLE:
+                try:
+                    self._curl_session.headers.update(self.headers)
+                    self._curl_session.auth = self.auth
+                    self._apply_doh_to_curl_session(target_host)
+
+                    # Disable unchecked automatic redirects; validate each hop manually
+                    resp = self._curl_session.get(
+                        current_url,
+                        params=current_params,
+                        headers=headers,
+                        timeout=timeout,
+                        allow_redirects=False,
+                    )
+                except Exception as e:
+                    log_event(
+                        "auth",
+                        f"curl_cffi request failed ({e}); automatically switching to stdlib TLS 1.3 + DoH SNI fallback."
+                    )
+                    CURL_CFFI_AVAILABLE = False
+                    try:
+                        self._curl_session.close()
+                    except Exception:
+                        pass
+                    self._curl_session = None
+
+            if resp is None:
+                resp = self._stdlib_session.get(
+                    current_url,
+                    params=current_params,
                     headers=headers,
+                    stream=stream,
                     timeout=timeout,
                     allow_redirects=allow_redirects,
                 )
-            except Exception as e:
-                log_event(
-                    "auth",
-                    f"curl_cffi request failed ({e}); automatically switching to stdlib TLS 1.3 + DoH SNI fallback."
-                )
-                CURL_CFFI_AVAILABLE = False
+                return resp
+
+            status = getattr(resp, "status_code", 200) or 200
+            if allow_redirects and status in (301, 302, 303, 307, 308):
+                loc = resp.headers.get("Location") or resp.headers.get("location")
                 try:
-                    self._curl_session.close()
+                    resp.close()
                 except Exception:
                     pass
-                self._curl_session = None
+                if not loc:
+                    return resp
+                next_url = urllib.parse.urljoin(current_url, loc)
+                next_parsed = urllib.parse.urlparse(next_url)
+                next_host = (next_parsed.hostname or "").lower()
+                if next_parsed.scheme != "https" or next_host not in ALLOWED_MEDIA_HOSTS:
+                    log_event("security", f"Blocked redirect to unauthorized host: {next_url}")
+                    raise PermissionError(f"Redirect to unauthorized host blocked: {next_host}")
+                current_url = next_url
+                current_params = None
+                continue
 
-        return self._stdlib_session.get(
-            url,
-            params=params,
-            headers=headers,
-            stream=stream,
-            timeout=timeout,
-            allow_redirects=allow_redirects,
-        )
+            return resp
+
+        raise RuntimeError("Maximum redirect hops exceeded")
 
     def close(self):
         if self._curl_session is not None:
@@ -1547,6 +1774,23 @@ def store_app_config(config_data):
         log_event("config", f"Failed to save app config: {e}")
 
 
+def _normalize_display_mode_value(val: str) -> str:
+    v = str(val or "scroll").strip().lower()
+    if v in ("polaroid", "slideshow", "masonry", "scroll"):
+        return v
+    # Automatically migrate legacy primary mode name to "polaroid"
+    if v.startswith("col"):
+        return "polaroid"
+    return "scroll"
+
+
+def _normalize_masonry_layout_value(val: str) -> str:
+    v = str(val or "mondrian").strip().lower()
+    if v in ("rows", "row", "google_photos", "googlephotos", "google", "google photos"):
+        return "rows"
+    return "mondrian"
+
+
 def load_project_json():
     if os.path.exists(PROJECT_JSON_FILE):
         try:
@@ -1559,10 +1803,22 @@ def load_project_json():
                         general_props[k] = json.loads(json.dumps(v))
                     else:
                         saved_val = general_props[k].get("value", v["value"])
+                        if k == "displaymode":
+                            saved_val = _normalize_display_mode_value(saved_val)
+                        elif k == "masonrylayout":
+                            saved_val = _normalize_masonry_layout_value(saved_val)
                         merged_meta = json.loads(json.dumps(v))
                         merged_meta["value"] = saved_val
                         general_props[k] = merged_meta
-                data.setdefault("screens", {})
+                screens_dict = data.setdefault("screens", {})
+                for s_cfg in screens_dict.values():
+                    if isinstance(s_cfg, dict) and isinstance(s_cfg.get("properties"), dict):
+                        dm = s_cfg["properties"].get("displaymode")
+                        if isinstance(dm, dict) and "value" in dm:
+                            dm["value"] = _normalize_display_mode_value(dm["value"])
+                        ml = s_cfg["properties"].get("masonrylayout")
+                        if isinstance(ml, dict) and "value" in ml:
+                            ml["value"] = _normalize_masonry_layout_value(ml["value"])
                 return data
         except Exception as e:
             log_event("config", f"Failed to read project.json: {e}")
@@ -1589,7 +1845,13 @@ def get_screen_config(screen_id="screen_1"):
         merged_props = json.loads(json.dumps(base_props))
         for k, v in sc.get("properties", {}).items():
             if k in merged_props and isinstance(v, dict) and "value" in v:
-                merged_props[k]["value"] = v["value"]
+                if k == "displaymode":
+                    val = _normalize_display_mode_value(v["value"])
+                elif k == "masonrylayout":
+                    val = _normalize_masonry_layout_value(v["value"])
+                else:
+                    val = v["value"]
+                merged_props[k]["value"] = val
             else:
                 merged_props[k] = v
         return {"enabled": enabled, "properties": merged_props}
@@ -1600,37 +1862,109 @@ def get_screen_config(screen_id="screen_1"):
     }
 
 
-def push_properties_to_webview(target_screen_id=None):
+def _js_eval_worker():
     """
-    Synchronizes Win32 multi-monitor Z-order/visibility and pushes per-screen
-    properties and enabled states to one or all WebView instances.
+    Single-flight background worker that executes queued win.evaluate_js calls sequentially
+    so rapid UI interactions never spawn competing threads on the WinForms Control.Invoke semaphore.
     """
-    sync_all_screens_z_order_and_geometry(target_screen_id)
+    global _JS_EVAL_WORKER_ACTIVE
+    while True:
+        with _JS_EVAL_LOCK:
+            if not _JS_EVAL_QUEUE:
+                _JS_EVAL_WORKER_ACTIVE = False
+                return
+            win, js_code, log_cat, log_msg = _JS_EVAL_QUEUE.popleft()
 
-    targets = (
-        [(target_screen_id, WEBVIEW_WINDOWS.get(target_screen_id))]
-        if target_screen_id and target_screen_id in WEBVIEW_WINDOWS
-        else list(WEBVIEW_WINDOWS.items())
-    )
-    for sid, win in targets:
-        if not win:
-            continue
-        try:
-            sc_cfg = get_screen_config(sid)
-            enabled = sc_cfg["enabled"]
-            props = sc_cfg["properties"]
-            payload = json.dumps(props)
-            enabled_js = "true" if enabled else "false"
-            js_code = (
-                f"if (window.setScreenEnabled) {{ window.setScreenEnabled({enabled_js}); }} "
-                f"if (window.wallpaperPropertyListener && window.wallpaperPropertyListener.applyUserProperties) {{ "
-                f"window.wallpaperPropertyListener.applyUserProperties({payload}); }} "
-                f"window.dispatchEvent(new Event('resize'));"
-            )
-            win.evaluate_js(js_code)
-            log_event("webview", f"Applied display properties to {sid} (enabled={enabled}).")
-        except Exception as e:
-            log_event("webview", f"Failed to push properties to {sid}: {e}")
+        if win:
+            try:
+                win.evaluate_js(js_code)
+                if log_cat and log_msg:
+                    log_event(log_cat, log_msg)
+            except Exception as e:
+                if log_cat:
+                    log_event(log_cat, f"JS evaluation warning: {e}")
+
+
+def _async_evaluate_js(win, js_code: str, log_cat: str = None, log_msg: str = None):
+    """Queues win.evaluate_js onto the single-flight daemon worker so the Tkinter UI thread never blocks."""
+    global _JS_EVAL_WORKER_ACTIVE
+    if not win:
+        return
+    with _JS_EVAL_LOCK:
+        _JS_EVAL_QUEUE.append((win, js_code, log_cat, log_msg))
+        if not _JS_EVAL_WORKER_ACTIVE:
+            _JS_EVAL_WORKER_ACTIVE = True
+            threading.Thread(target=_js_eval_worker, daemon=True).start()
+
+
+def _property_push_worker():
+    """
+    Single-flight background worker that coalesces rapid property updates and applies them
+    without blocking the Tkinter mainloop or firing redundant synchronous Win32 SetWindowPos calls.
+    """
+    global _PROP_PUSH_WORKER_ACTIVE, _PENDING_SYNC_GEOMETRY
+    while True:
+        with _PROP_PUSH_LOCK:
+            if not _PENDING_PROP_SCREENS:
+                _PROP_PUSH_WORKER_ACTIVE = False
+                return
+            if "__ALL__" in _PENDING_PROP_SCREENS:
+                batch_sids = list(WEBVIEW_WINDOWS.keys())
+                target_geom_sid = None
+            else:
+                batch_sids = list(_PENDING_PROP_SCREENS)
+                target_geom_sid = batch_sids[0] if len(batch_sids) == 1 else None
+            _PENDING_PROP_SCREENS.clear()
+            do_geom = _PENDING_SYNC_GEOMETRY
+            _PENDING_SYNC_GEOMETRY = False
+
+        if do_geom:
+            try:
+                sync_all_screens_z_order_and_geometry(target_geom_sid)
+            except Exception as e:
+                log_event("win32", f"Geometry sync warning: {e}")
+
+        for sid in batch_sids:
+            win = WEBVIEW_WINDOWS.get(sid)
+            if not win:
+                continue
+            try:
+                sc_cfg = get_screen_config(sid)
+                enabled = sc_cfg["enabled"]
+                props = sc_cfg["properties"]
+                payload = json.dumps(props)
+                enabled_js = "true" if enabled else "false"
+                js_code = (
+                    f"if (window.setScreenEnabled) {{ window.setScreenEnabled({enabled_js}); }} "
+                    f"if (window.wallpaperPropertyListener && window.wallpaperPropertyListener.applyUserProperties) {{ "
+                    f"window.wallpaperPropertyListener.applyUserProperties({payload}); }}"
+                )
+                win.evaluate_js(js_code)
+                log_event("webview", f"Applied display properties to {sid} (enabled={enabled}).")
+            except Exception as e:
+                log_event("webview", f"Failed to push properties to {sid}: {e}")
+
+
+def push_properties_to_webview(target_screen_id=None, sync_geometry=False):
+    """
+    Coalesces and asynchronously pushes per-screen properties to WebView2 instances
+    on a single-flight background thread, preventing cross-thread deadlocks between
+    Tkinter and WebView2 when rapidly toggling Masonry layouts or sliders.
+    """
+    global PROP_SEQ, _PROP_PUSH_WORKER_ACTIVE, _PENDING_SYNC_GEOMETRY
+    with DATA_LOCK:
+        PROP_SEQ += 1
+
+    with _PROP_PUSH_LOCK:
+        if target_screen_id:
+            _PENDING_PROP_SCREENS.add(target_screen_id)
+        else:
+            _PENDING_PROP_SCREENS.add("__ALL__")
+        if sync_geometry:
+            _PENDING_SYNC_GEOMETRY = True
+        if not _PROP_PUSH_WORKER_ACTIVE:
+            _PROP_PUSH_WORKER_ACTIVE = True
+            threading.Thread(target=_property_push_worker, daemon=True).start()
 
 
 def push_pause_states_to_webviews():
@@ -1640,21 +1974,49 @@ def push_pause_states_to_webviews():
     js_code = f"if (window.applyPauseStates) {{ window.applyPauseStates({app_p}, {wp_p}); }}"
     for sid, win in list(WEBVIEW_WINDOWS.items()):
         if win:
-            try:
-                win.evaluate_js(js_code)
-            except Exception:
-                pass
+            _async_evaluate_js(win, js_code)
 
 
 def trigger_fill_screen_on_webview(screen_id):
-    """Triggers the Collage Fill Screen burst on the specified screen."""
+    """Triggers the Polaroid Fill Screen burst on the specified screen."""
     win = WEBVIEW_WINDOWS.get(screen_id)
     if win:
-        try:
-            win.evaluate_js("if (window.triggerFillCollageScreen) { window.triggerFillCollageScreen(); }")
-            log_event("collage", f"Triggered Fill Screen burst on {screen_id}.")
-        except Exception as e:
-            log_event("collage", f"Failed to trigger Fill Screen on {screen_id}: {e}")
+        _async_evaluate_js(
+            win,
+            "if (window.triggerFillPolaroidScreen) { window.triggerFillPolaroidScreen(); }",
+            log_cat="polaroid",
+            log_msg=f"Triggered Fill Screen burst on {screen_id}.",
+        )
+
+
+def trigger_navigation_on_webviews(action: str) -> bool:
+    """
+    Triggers 'prev' (requeue last shown file to front of queue) or 'next' (immediately play next queued file)
+    across all active WebView2 screens. Enforces a strict 1.0-second internal cooldown so rapid button presses
+    under high-stress 36-tile Masonry layouts never flood WebView2 IPC or overlap 3D transitions.
+    """
+    global NAV_SEQ, NAV_ACTION, LAST_NAV_TRIGGER_TIME
+    if action not in ("prev", "next"):
+        return False
+    now = time.monotonic()
+    with DATA_LOCK:
+        if (now - LAST_NAV_TRIGGER_TIME) < NAV_BUTTON_COOLDOWN_SEC:
+            return False
+        LAST_NAV_TRIGGER_TIME = now
+        NAV_SEQ += 1
+        NAV_ACTION = action
+        seq_val = NAV_SEQ
+
+    js_fn = "triggerPreviousMedia" if action == "prev" else "triggerNextMedia"
+    js_code = f"if (window.{js_fn}) {{ window.{js_fn}({seq_val}); }}"
+    for sid, win in list(WEBVIEW_WINDOWS.items()):
+        if win:
+            _async_evaluate_js(win, js_code)
+    if action == "prev":
+        log_event("nav", "Requeued last shown file to the front of the display queue (Previous).")
+    else:
+        log_event("nav", "Immediately triggered next queued file on active screens (Next).")
+    return True
 
 
 _initial_cfg = load_app_config()
@@ -1923,14 +2285,20 @@ def fill_post_buffer(wait_if_busy=False):
                     if not pid or pid in SEEN_POST_IDS or not file_url or ext not in ALLOWED_EXTENSIONS:
                         continue
 
-                    if ext == "mp4" and (file_size <= 0 or file_size > MAX_MP4_FILE_SIZE_BYTES):
+                    is_safe_url, verified_ext, _ = validate_safe_media_url(file_url, ext)
+                    if not is_safe_url:
+                        continue
+
+                    if verified_ext == "mp4" and (file_size <= 0 or file_size > MAX_MP4_FILE_SIZE_BYTES):
                         skipped_large_mp4 += 1
+                        continue
+                    if verified_ext != "mp4" and file_size > MAX_IMAGE_FILE_SIZE_BYTES:
                         continue
 
                     track_post_id_locked(pid)
                     safe_url = urllib.parse.quote(file_url, safe="")
                     local_media_endpoint = (
-                        f"http://127.0.0.1:{PORT}/media?url={safe_url}&ext={ext}&size={file_size}"
+                        f"http://127.0.0.1:{PORT}/media?url={safe_url}&ext={verified_ext}&size={file_size}"
                     )
                     p["media_url"] = local_media_endpoint
                     p["proxy_url"] = local_media_endpoint
@@ -2031,6 +2399,13 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
                 self.send_header("Referrer-Policy", "no-referrer")
                 self.send_header("X-Frame-Options", "DENY")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.send_header(
+                    "Content-Security-Policy",
+                    "default-src 'self'; img-src 'self' blob: data:; media-src 'self' blob:; "
+                    "script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; "
+                    "connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none';"
+                )
                 self.send_header("Connection", "close")
                 self.end_headers()
                 self.wfile.write(html_bytes)
@@ -2053,6 +2428,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(props_body)))
+                self.send_header("X-Content-Type-Options", "nosniff")
                 self.send_header("Cache-Control", "no-store")
                 self.send_header("Connection", "close")
                 self.end_headers()
@@ -2076,6 +2452,9 @@ class ProxyHandler(BaseHTTPRequestHandler):
                     "epoch": CACHE_EPOCH,
                     "app_paused": APP_PAUSED,
                     "wallpaper_paused": WALLPAPER_PAUSED,
+                    "nav_seq": NAV_SEQ,
+                    "nav_action": NAV_ACTION,
+                    "prop_seq": PROP_SEQ,
                 }).encode("utf-8")
 
                 elapsed = now - LAST_EPOCH_LOG_TIME
@@ -2092,6 +2471,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
             try:
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
+                self.send_header("X-Content-Type-Options", "nosniff")
                 self.send_header("Cache-Control", "no-store")
                 self.send_header("Connection", "close")
                 self.end_headers()
@@ -2107,6 +2487,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
                     self.send_response(200)
                     self.send_header("Content-Type", "application/json")
                     self.send_header("Content-Length", str(len(empty_body)))
+                    self.send_header("X-Content-Type-Options", "nosniff")
                     self.send_header("Connection", "close")
                     self.end_headers()
                     self.wfile.write(empty_body)
@@ -2161,6 +2542,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(response_body)))
                 self.send_header("X-Danbooru-Epoch", str(active_epoch))
+                self.send_header("X-Content-Type-Options", "nosniff")
                 self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
                 self.send_header("Connection", "close")
                 self.end_headers()
@@ -2198,37 +2580,37 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 self.end_headers()
                 return
 
-            parsed_target = urllib.parse.urlparse(target_url)
-            target_host = (parsed_target.hostname or "").lower()
-            if parsed_target.scheme != "https" or target_host not in ALLOWED_MEDIA_HOSTS:
-                log_event("security", f"Blocked unauthorized media host: {target_host}")
+            is_safe_url, verified_ext, reject_reason = validate_safe_media_url(target_url, ext_hint)
+            if not is_safe_url:
+                log_event("security", f"Blocked unsafe /media URL ({reject_reason}): {target_url}")
                 self.send_response(403)
                 self.send_header("Connection", "close")
                 self.end_headers()
                 return
 
-            is_mp4 = ext_hint == "mp4" or parsed_target.path.lower().endswith(".mp4")
+            is_mp4 = verified_ext == "mp4"
+            max_allowed_bytes = MAX_MP4_FILE_SIZE_BYTES if is_mp4 else MAX_IMAGE_FILE_SIZE_BYTES
 
-            if is_mp4:
-                try:
-                    if int(size_hint_str) > MAX_MP4_FILE_SIZE_BYTES:
-                        log_event("proxy", f"Filtered oversized MP4 ({size_hint_str} bytes > 15 MB): {target_url}")
-                        self.send_response(413)
-                        self.send_header("Connection", "close")
-                        self.end_headers()
-                        return
-                except ValueError:
-                    pass
+            try:
+                if int(size_hint_str) > max_allowed_bytes:
+                    log_event("proxy", f"Filtered oversized media ({size_hint_str} bytes > {max_allowed_bytes}): {target_url}")
+                    self.send_response(413)
+                    self.send_header("Connection", "close")
+                    self.end_headers()
+                    return
+            except ValueError:
+                pass
 
             req_headers = {
                 "User-Agent": build_danbooru_user_agent(),
                 "Referer": "https://danbooru.donmai.us/",
                 "Accept": "image/avif,image/webp,image/apng,image/*,video/mp4,video/*;q=0.9,*/*;q=0.8",
             }
+            client_range = None
             if is_mp4:
                 client_range = self.headers.get("Range")
-                if client_range:
-                    req_headers["Range"] = client_range
+                if client_range and re.match(r"^bytes=\d*-\d*$", client_range.strip()):
+                    req_headers["Range"] = client_range.strip()
 
             headers_sent = False
             resp = None
@@ -2250,23 +2632,15 @@ class ProxyHandler(BaseHTTPRequestHandler):
                     self.end_headers()
                     return
 
-                content_type = (
-                    resp.headers.get("Content-Type")
-                    or resp.headers.get("content-type")
-                    or ("video/mp4" if is_mp4 else "image/jpeg")
-                )
                 content_len_str = resp.headers.get("Content-Length") or resp.headers.get("content-length")
                 content_range = resp.headers.get("Content-Range") or resp.headers.get("content-range")
 
-                if "video/mp4" in content_type.lower():
-                    is_mp4 = True
-
-                if is_mp4 and content_len_str:
+                if content_len_str:
                     try:
-                        if int(content_len_str) > MAX_MP4_FILE_SIZE_BYTES:
+                        if int(content_len_str) > max_allowed_bytes:
                             log_event(
                                 "proxy",
-                                f"Filtered oversized MP4 from stream ({int(content_len_str):,} bytes > 15 MB): {target_url}"
+                                f"Filtered oversized stream ({int(content_len_str):,} bytes > {max_allowed_bytes:,}): {target_url}"
                             )
                             self.send_response(413)
                             self.send_header("Connection", "close")
@@ -2275,8 +2649,36 @@ class ProxyHandler(BaseHTTPRequestHandler):
                     except ValueError:
                         pass
 
+                chunk_iter = iter(iter_response_chunks(resp, chunk_size=65536))
+                first_buf = bytearray()
+                for candidate_chunk in chunk_iter:
+                    if candidate_chunk:
+                        first_buf.extend(candidate_chunk)
+                        if len(first_buf) >= 32:
+                            break
+                first_chunk = bytes(first_buf)
+
+                if not first_chunk:
+                    self.send_response(502)
+                    self.send_header("Connection", "close")
+                    self.end_headers()
+                    return
+
+                is_range_cont = bool(status_code == 206 and client_range and not client_range.startswith("bytes=0-"))
+                magic_ok, verified_mime, magic_reason = verify_media_magic_bytes(first_chunk, is_range_continuation=is_range_cont)
+                if not magic_ok:
+                    log_event("security", f"Blocked suspicious file payload ({magic_reason}) from {target_url}")
+                    self.send_response(415)
+                    self.send_header("Connection", "close")
+                    self.end_headers()
+                    return
+
                 self.send_response(status_code)
-                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Type", verified_mime)
+                self.send_header("Content-Disposition", "inline")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.send_header("X-Frame-Options", "DENY")
+                self.send_header("Content-Security-Policy", "default-src 'none'; img-src 'self' data: blob:; media-src 'self' blob:; style-src 'unsafe-inline'")
                 if content_len_str:
                     self.send_header("Content-Length", content_len_str)
                 if content_range:
@@ -2287,13 +2689,18 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 self.end_headers()
                 headers_sent = True
 
-                bytes_streamed = 0
-                for chunk in iter_response_chunks(resp, chunk_size=65536):
+                bytes_streamed = len(first_chunk)
+                if bytes_streamed > max_allowed_bytes:
+                    log_event("proxy", f"Aborted stream exceeding size cap ({max_allowed_bytes:,} bytes): {target_url}")
+                    return
+                self.wfile.write(first_chunk)
+
+                for chunk in chunk_iter:
                     if APP_PAUSED or not chunk:
                         break
                     bytes_streamed += len(chunk)
-                    if is_mp4 and bytes_streamed > MAX_MP4_FILE_SIZE_BYTES:
-                        log_event("proxy", f"Aborted MP4 stream exceeding 15 MB cap: {target_url}")
+                    if bytes_streamed > max_allowed_bytes:
+                        log_event("proxy", f"Aborted stream exceeding size cap ({max_allowed_bytes:,} bytes): {target_url}")
                         break
                     self.wfile.write(chunk)
 
@@ -2431,9 +2838,1009 @@ class GlossaryDialog(tk.Toplevel):
         self.destroy()
 
 
+# =============================================================================
+# 6B. WINDOWS TASK MANAGER PERFORMANCE RESOURCE MONITOR & GRAPH POP-OUT DIALOG
+# =============================================================================
+TH32CS_SNAPPROCESS = 0x00000002
+PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+PDH_FMT_DOUBLE = 0x00000200
+PDH_MORE_DATA = 0x800007D2
+
+
+class PROCESSENTRY32W(ctypes.Structure):
+    _fields_ = [
+        ("dwSize", wintypes.DWORD),
+        ("cntUsage", wintypes.DWORD),
+        ("th32ProcessID", wintypes.DWORD),
+        ("th32DefaultHeapID", ctypes.c_size_t),
+        ("th32ModuleID", wintypes.DWORD),
+        ("cntThreads", wintypes.DWORD),
+        ("th32ParentProcessID", wintypes.DWORD),
+        ("pcPriClassBase", wintypes.LONG),
+        ("dwFlags", wintypes.DWORD),
+        ("szExeFile", wintypes.WCHAR * 260),
+    ]
+
+
+class FILETIME(ctypes.Structure):
+    _fields_ = [
+        ("dwLowDateTime", wintypes.DWORD),
+        ("dwHighDateTime", wintypes.DWORD),
+    ]
+
+
+class PROCESS_MEMORY_COUNTERS_EX(ctypes.Structure):
+    _fields_ = [
+        ("cb", wintypes.DWORD),
+        ("PageFaultCount", wintypes.DWORD),
+        ("PeakWorkingSetSize", ctypes.c_size_t),
+        ("WorkingSetSize", ctypes.c_size_t),
+        ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+        ("QuotaPagedPoolUsage", ctypes.c_size_t),
+        ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+        ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+        ("PagefileUsage", ctypes.c_size_t),
+        ("PeakPagefileUsage", ctypes.c_size_t),
+        ("PrivateUsage", ctypes.c_size_t),
+    ]
+
+
+class MEMORYSTATUSEX(ctypes.Structure):
+    _fields_ = [
+        ("dwLength", wintypes.DWORD),
+        ("dwMemoryLoad", wintypes.DWORD),
+        ("ullTotalPhys", ctypes.c_uint64),
+        ("ullAvailPhys", ctypes.c_uint64),
+        ("ullTotalPageFile", ctypes.c_uint64),
+        ("ullAvailPageFile", ctypes.c_uint64),
+        ("ullTotalVirtual", ctypes.c_uint64),
+        ("ullAvailVirtual", ctypes.c_uint64),
+        ("ullAvailExtendedVirtual", ctypes.c_uint64),
+    ]
+
+
+class PDH_FMT_COUNTERVALUE_DOUBLE(ctypes.Structure):
+    _fields_ = [
+        ("CStatus", wintypes.DWORD),
+        ("doubleValue", ctypes.c_double),
+    ]
+
+
+class PDH_FMT_COUNTERVALUE_ITEM_W(ctypes.Structure):
+    _fields_ = [
+        ("szName", wintypes.LPWSTR),
+        ("FmtValue", PDH_FMT_COUNTERVALUE_DOUBLE),
+    ]
+
+
+class DISPLAY_DEVICEW(ctypes.Structure):
+    _fields_ = [
+        ("cb", wintypes.DWORD),
+        ("DeviceName", wintypes.WCHAR * 32),
+        ("DeviceString", wintypes.WCHAR * 128),
+        ("StateFlags", wintypes.DWORD),
+        ("DeviceID", wintypes.WCHAR * 128),
+        ("DeviceKey", wintypes.WCHAR * 128),
+    ]
+
+
+def _detect_primary_gpu_name() -> str:
+    try:
+        dd = DISPLAY_DEVICEW()
+        dd.cb = ctypes.sizeof(DISPLAY_DEVICEW)
+        if user32.EnumDisplayDevicesW(None, 0, ctypes.byref(dd), 0):
+            name = (dd.DeviceString or "").strip()
+            if name:
+                return name
+    except Exception:
+        pass
+    return "Direct3D / WebView2 GPU Engine"
+
+
+class AppResourceMonitor:
+    """
+    Collects real-time CPU (%), RAM (Working Set & Private Commit MB / %), and GPU (%)
+    utilization across the wallpaper application's entire process tree
+    (Python host + child msedgewebview2.exe processes) using native Win32 APIs.
+    """
+    HISTORY_LEN = 60
+
+    def __init__(self):
+        self.root_pid = os.getpid()
+        self.logical_cpus = max(1, os.cpu_count() or 1)
+        self.total_phys_mb = self._query_total_physical_ram_mb()
+        self.gpu_name = _detect_primary_gpu_name()
+        self.start_time = time.time()
+
+        self.cpu_history = deque([0.0] * self.HISTORY_LEN, maxlen=self.HISTORY_LEN)
+        self.ram_mb_history = deque([0.0] * self.HISTORY_LEN, maxlen=self.HISTORY_LEN)
+        self.ram_pct_history = deque([0.0] * self.HISTORY_LEN, maxlen=self.HISTORY_LEN)
+        self.gpu_history = deque([0.0] * self.HISTORY_LEN, maxlen=self.HISTORY_LEN)
+
+        self.current_cpu_pct = 0.0
+        self.current_ram_mb = 0.0
+        self.current_private_mb = 0.0
+        self.current_ram_pct = 0.0
+        self.current_gpu_pct = 0.0
+
+        self.peak_cpu_pct = 0.0
+        self.peak_ram_mb = 0.0
+        self.peak_gpu_pct = 0.0
+
+        self.process_count = 1
+        self.thread_count = 1
+
+        self._prev_proc_times = {}      # pid -> int (100-ns kernel+user ticks)
+        self._prev_gpu_sub_times = {}   # pid -> int (100-ns ticks for gpu subprocess fallback)
+        self._prev_sample_ts = time.perf_counter()
+
+        self._pdh_dll = None
+        self._pdh_query = ctypes.c_void_p(0)
+        self._pdh_gpu_counter = ctypes.c_void_p(0)
+        self._pdh_available = False
+        self._init_pdh_gpu_counter()
+
+        # Prime baseline process times so the first visible tick has a valid delta
+        self.sample()
+
+    def _query_total_physical_ram_mb(self) -> float:
+        try:
+            ms = MEMORYSTATUSEX()
+            ms.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
+            if kernel32.GlobalMemoryStatusEx(ctypes.byref(ms)) and ms.ullTotalPhys > 0:
+                return float(ms.ullTotalPhys) / (1024.0 * 1024.0)
+        except Exception:
+            pass
+        return 16384.0
+
+    def _init_pdh_gpu_counter(self):
+        try:
+            self._pdh_dll = ctypes.windll.pdh
+            q = ctypes.c_void_p(0)
+            if self._pdh_dll.PdhOpenQueryW(None, 0, ctypes.byref(q)) != 0:
+                return
+            c = ctypes.c_void_p(0)
+            path = "\\GPU Engine(*)\\Utilization Percentage"
+            add_fn = getattr(self._pdh_dll, "PdhAddEnglishCounterW", self._pdh_dll.PdhAddCounterW)
+            if add_fn(q, wintypes.LPCWSTR(path), 0, ctypes.byref(c)) != 0:
+                self._pdh_dll.PdhCloseQuery(q)
+                return
+            self._pdh_dll.PdhCollectQueryData(q)
+            self._pdh_query = q
+            self._pdh_gpu_counter = c
+            self._pdh_available = True
+        except Exception:
+            self._pdh_available = False
+
+    def close(self):
+        if self._pdh_available and self._pdh_dll and self._pdh_query:
+            try:
+                self._pdh_dll.PdhCloseQuery(self._pdh_query)
+            except Exception:
+                pass
+            self._pdh_available = False
+
+    def _enumerate_app_process_tree(self) -> tuple[set[int], int]:
+        """Returns (set_of_pids_in_app_tree, total_threads_in_tree)."""
+        parent_map = {}
+        threads_map = {}
+        snap = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+        if snap == ctypes.c_void_p(-1).value or not snap:
+            return {self.root_pid}, 1
+
+        try:
+            pe = PROCESSENTRY32W()
+            pe.dwSize = ctypes.sizeof(PROCESSENTRY32W)
+            ok = kernel32.Process32FirstW(snap, ctypes.byref(pe))
+            while ok:
+                pid = int(pe.th32ProcessID)
+                ppid = int(pe.th32ParentProcessID)
+                parent_map[pid] = ppid
+                threads_map[pid] = int(pe.cntThreads)
+                ok = kernel32.Process32NextW(snap, ctypes.byref(pe))
+        except Exception:
+            pass
+        finally:
+            kernel32.CloseHandle(snap)
+
+        tree_pids = {self.root_pid}
+        added = True
+        while added:
+            added = False
+            for pid, ppid in parent_map.items():
+                if pid not in tree_pids and ppid in tree_pids:
+                    tree_pids.add(pid)
+                    added = True
+
+        total_threads = sum(threads_map.get(p, 1) for p in tree_pids)
+        return tree_pids, max(1, total_threads)
+
+    def _query_process_ticks_and_ram(self, pid: int) -> tuple[int, int, int]:
+        """Returns (cpu_100ns_ticks, working_set_bytes, private_bytes) for a single PID."""
+        h_proc = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, wintypes.DWORD(pid))
+        if not h_proc:
+            return 0, 0, 0
+        ticks = 0
+        ws_bytes = 0
+        priv_bytes = 0
+        try:
+            ft_create = FILETIME()
+            ft_exit = FILETIME()
+            ft_kernel = FILETIME()
+            ft_user = FILETIME()
+            if kernel32.GetProcessTimes(
+                h_proc,
+                ctypes.byref(ft_create),
+                ctypes.byref(ft_exit),
+                ctypes.byref(ft_kernel),
+                ctypes.byref(ft_user),
+            ):
+                k_val = (ft_kernel.dwHighDateTime << 32) | ft_kernel.dwLowDateTime
+                u_val = (ft_user.dwHighDateTime << 32) | ft_user.dwLowDateTime
+                ticks = k_val + u_val
+
+            pmc = PROCESS_MEMORY_COUNTERS_EX()
+            pmc.cb = ctypes.sizeof(PROCESS_MEMORY_COUNTERS_EX)
+            mem_ok = False
+            if hasattr(kernel32, "K32GetProcessMemoryInfo"):
+                mem_ok = bool(kernel32.K32GetProcessMemoryInfo(h_proc, ctypes.byref(pmc), pmc.cb))
+            elif hasattr(ctypes.windll, "psapi"):
+                mem_ok = bool(ctypes.windll.psapi.GetProcessMemoryInfo(h_proc, ctypes.byref(pmc), pmc.cb))
+            if mem_ok:
+                ws_bytes = int(pmc.WorkingSetSize)
+                priv_bytes = int(pmc.PrivateUsage or pmc.PagefileUsage)
+        except Exception:
+            pass
+        finally:
+            kernel32.CloseHandle(h_proc)
+        return ticks, ws_bytes, priv_bytes
+
+    def _query_pdh_gpu_utilization(self, tree_pids: set[int]) -> tuple[bool, float]:
+        """Queries Windows PDH \\GPU Engine(*)\\Utilization Percentage filtered by tree_pids."""
+        if not self._pdh_available or not self._pdh_dll or not self._pdh_query:
+            return False, 0.0
+        try:
+            if self._pdh_dll.PdhCollectQueryData(self._pdh_query) != 0:
+                return False, 0.0
+
+            buf_size = wintypes.DWORD(0)
+            item_count = wintypes.DWORD(0)
+            status = self._pdh_dll.PdhGetFormattedCounterArrayW(
+                self._pdh_gpu_counter,
+                PDH_FMT_DOUBLE,
+                ctypes.byref(buf_size),
+                ctypes.byref(item_count),
+                None,
+            )
+            if status not in (0, PDH_MORE_DATA, -2147481646) or buf_size.value == 0:
+                return False, 0.0
+
+            raw_buf = ctypes.create_string_buffer(buf_size.value)
+            status = self._pdh_dll.PdhGetFormattedCounterArrayW(
+                self._pdh_gpu_counter,
+                PDH_FMT_DOUBLE,
+                ctypes.byref(buf_size),
+                ctypes.byref(item_count),
+                ctypes.cast(raw_buf, ctypes.c_void_p),
+            )
+            if status != 0 or item_count.value == 0:
+                return False, 0.0
+
+            items_ptr = ctypes.cast(raw_buf, ctypes.POINTER(PDH_FMT_COUNTERVALUE_ITEM_W))
+            pid_tokens = tuple(f"pid_{p}_" for p in tree_pids)
+            app_gpu_sum = 0.0
+            matched_any_pid = False
+
+            for i in range(item_count.value):
+                item = items_ptr[i]
+                name = (item.szName or "").lower()
+                val = float(item.FmtValue.doubleValue or 0.0)
+                if val < 0.0 or val > 100.0:
+                    continue
+                if any(tok in name for tok in pid_tokens):
+                    matched_any_pid = True
+                    app_gpu_sum += val
+
+            if matched_any_pid:
+                return True, max(0.0, min(100.0, app_gpu_sum))
+            return True, 0.0
+        except Exception:
+            return False, 0.0
+
+    def sample(self) -> dict:
+        now_ts = time.perf_counter()
+        dt = max(0.05, now_ts - self._prev_sample_ts)
+        self._prev_sample_ts = now_ts
+
+        tree_pids, total_threads = self._enumerate_app_process_tree()
+        self.process_count = len(tree_pids)
+        self.thread_count = total_threads
+
+        new_proc_times = {}
+        delta_ticks = 0
+        child_ticks_delta = 0
+        total_ws_bytes = 0
+        total_priv_bytes = 0
+
+        for pid in tree_pids:
+            ticks, ws_b, priv_b = self._query_process_ticks_and_ram(pid)
+            total_ws_bytes += ws_b
+            total_priv_bytes += priv_b
+            if ticks > 0:
+                new_proc_times[pid] = ticks
+                prev_t = self._prev_proc_times.get(pid)
+                if prev_t is not None and ticks >= prev_t:
+                    d = ticks - prev_t
+                    delta_ticks += d
+                    if pid != self.root_pid:
+                        child_ticks_delta += d
+
+        self._prev_proc_times = new_proc_times
+
+        # 10,000,000 ticks = 1.0 second of 1 logical processor core
+        wall_capacity_ticks = dt * 10_000_000.0 * self.logical_cpus
+        cpu_pct = (delta_ticks / wall_capacity_ticks) * 100.0 if wall_capacity_ticks > 0 else 0.0
+        cpu_pct = max(0.0, min(100.0, cpu_pct))
+
+        ws_mb = float(total_ws_bytes) / (1024.0 * 1024.0)
+        priv_mb = float(total_priv_bytes) / (1024.0 * 1024.0)
+        ram_pct = max(0.0, min(100.0, (ws_mb / max(1.0, self.total_phys_mb)) * 100.0))
+
+        pdh_ok, gpu_pct = self._query_pdh_gpu_utilization(tree_pids)
+        if not pdh_ok or (gpu_pct == 0.0 and child_ticks_delta > 0):
+            # When PDH GPU counters are unavailable or masked by driver privileges,
+            # estimate WebView2 compositor/GPU child activity from active child process time
+            single_core_ticks = dt * 10_000_000.0
+            est_gpu = (child_ticks_delta / max(1.0, single_core_ticks)) * 45.0
+            gpu_pct = max(gpu_pct, min(100.0, est_gpu))
+
+        self.current_cpu_pct = round(cpu_pct, 1)
+        self.current_ram_mb = round(ws_mb, 1)
+        self.current_private_mb = round(priv_mb, 1)
+        self.current_ram_pct = round(ram_pct, 1)
+        self.current_gpu_pct = round(gpu_pct, 1)
+
+        self.peak_cpu_pct = max(self.peak_cpu_pct, self.current_cpu_pct)
+        self.peak_ram_mb = max(self.peak_ram_mb, self.current_ram_mb)
+        self.peak_gpu_pct = max(self.peak_gpu_pct, self.current_gpu_pct)
+
+        self.cpu_history.append(self.current_cpu_pct)
+        self.ram_mb_history.append(self.current_ram_mb)
+        self.ram_pct_history.append(self.current_ram_pct)
+        self.gpu_history.append(self.current_gpu_pct)
+
+        return {
+            "cpu_pct": self.current_cpu_pct,
+            "ram_mb": self.current_ram_mb,
+            "private_mb": self.current_private_mb,
+            "ram_pct": self.current_ram_pct,
+            "gpu_pct": self.current_gpu_pct,
+        }
+
+
+class ResourceGraphDialog(tk.Toplevel):
+    """
+    Windows Task Manager Performance-style pop-out window triggered by the 'Resource Graph'
+    button at the top of the Settings dialog. Displays real-time scrolling 60-second graphs
+    and telemetry readouts for CPU, Memory (RAM), and GPU utilization of the wallpaper app.
+    """
+    RESOURCE_SPECS = {
+        "cpu": {
+            "title": "CPU",
+            "unit_label": "% Utilization",
+            "max_label": "100%",
+            "stroke_dark": "#2899f5",
+            "fill_dark": "#113255",
+            "grid_dark": "#1b2e44",
+            "stroke_light": "#0078d4",
+            "fill_light": "#cfe8fc",
+            "grid_light": "#bbd9f5",
+        },
+        "ram": {
+            "title": "Memory",
+            "unit_label": "% of Total System Memory",
+            "max_label": "100%",
+            "stroke_dark": "#b4009e",
+            "fill_dark": "#3b1238",
+            "grid_dark": "#3f1d3d",
+            "stroke_light": "#881798",
+            "fill_light": "#f0d3f4",
+            "grid_light": "#dec0e3",
+        },
+        "gpu": {
+            "title": "GPU 0",
+            "unit_label": "% Utilization (3D / WebView2)",
+            "max_label": "100%",
+            "stroke_dark": "#00cc6a",
+            "fill_dark": "#0e3a24",
+            "grid_dark": "#18422c",
+            "stroke_light": "#107c10",
+            "fill_light": "#d2f4dc",
+            "grid_light": "#b6e3c4",
+        },
+    }
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.is_open = True
+        self._drag_x = 0
+        self._drag_y = 0
+        self._tick_job = None
+        self._grid_scroll_step = 0
+        self._graph_paused = False
+        self.selected_tab = "cpu"  # 'cpu' | 'ram' | 'gpu' | 'all'
+
+        self.monitor = AppResourceMonitor()
+
+        self.overrideredirect(True)
+        self.attributes("-alpha", 0.98)
+        self.attributes("-topmost", True)
+
+        width = 780
+        height = 500
+        parent.update_idletasks()
+        px = parent.winfo_x()
+        py = parent.winfo_y()
+        sw = self.winfo_screenwidth()
+        sh = self.winfo_screenheight()
+
+        x = max(20, min(px + 36, sw - width - 20))
+        y = max(20, min(py + 28, sh - height - 20))
+        self.geometry(f"{width}x{height}+{x}+{y}")
+
+        self.container = tk.Frame(self, highlightthickness=1)
+        self.container.pack(fill="both", expand=True, padx=1, pady=1)
+
+        # Window Title Bar
+        self.header = tk.Frame(self.container)
+        self.header.pack(fill="x", padx=14, pady=(9, 6))
+
+        self.title_lbl = tk.Label(
+            self.header,
+            text="📊 PERFORMANCE — RESOURCE GRAPH (TASK MANAGER VIEW)",
+            font=("Segoe UI", 10, "bold"),
+        )
+        self.title_lbl.pack(side="left")
+
+        self.close_btn = tk.Label(
+            self.header, text="✕", font=("Segoe UI", 10, "bold"), cursor="hand2", padx=4
+        )
+        self.close_btn.pack(side="right")
+        self.close_btn.bind("<Button-1>", lambda e: self.close_resource_graph())
+
+        self.pause_graph_btn = tk.Button(
+            self.header,
+            text="⏸ Pause Graph",
+            font=("Segoe UI", 8, "bold"),
+            bd=0,
+            relief="flat",
+            padx=10,
+            pady=2,
+            cursor="hand2",
+            command=self._toggle_pause_graph,
+        )
+        self.pause_graph_btn.pack(side="right", padx=(0, 10))
+
+        self.header.bind("<Button-1>", self.start_move)
+        self.header.bind("<B1-Motion>", self.do_move)
+        self.title_lbl.bind("<Button-1>", self.start_move)
+        self.title_lbl.bind("<B1-Motion>", self.do_move)
+
+        self.sep_top = tk.Frame(self.container, height=1)
+        self.sep_top.pack(fill="x")
+
+        # Main Task Manager Split Layout: Left Selector Sidebar + Right Graph Viewport
+        self.body = tk.Frame(self.container)
+        self.body.pack(fill="both", expand=True, padx=12, pady=10)
+
+        self.sidebar = tk.Frame(self.body, width=215)
+        self.sidebar.pack(side="left", fill="y", padx=(0, 12))
+        self.sidebar.pack_propagate(False)
+
+        self.main_pane = tk.Frame(self.body)
+        self.main_pane.pack(side="left", fill="both", expand=True)
+
+        # Build Left Sidebar Resource Cards (CPU, Memory, GPU, All Combined)
+        self.nav_cards = {}
+        for key, label_title in (
+            ("cpu", "CPU"),
+            ("ram", "Memory"),
+            ("gpu", "GPU 0"),
+            ("all", "All Graphs (3x)"),
+        ):
+            card = tk.Frame(self.sidebar, highlightthickness=1, cursor="hand2")
+            card.pack(fill="x", pady=(0, 6))
+
+            accent_bar = tk.Frame(card, width=4)
+            accent_bar.pack(side="left", fill="y")
+
+            mini_canvas = tk.Canvas(
+                card, width=62, height=44, bd=0, highlightthickness=1, cursor="hand2"
+            )
+            mini_canvas.pack(side="left", padx=(6, 8), pady=6)
+
+            txt_frame = tk.Frame(card, cursor="hand2")
+            txt_frame.pack(side="left", fill="both", expand=True, pady=6)
+
+            t_lbl = tk.Label(
+                txt_frame, text=label_title, font=("Segoe UI", 9, "bold"), anchor="w", cursor="hand2"
+            )
+            t_lbl.pack(fill="x")
+
+            sub_lbl = tk.Label(
+                txt_frame, text="0%", font=("Segoe UI", 8), anchor="w", cursor="hand2"
+            )
+            sub_lbl.pack(fill="x", pady=(1, 0))
+
+            for w in (card, accent_bar, mini_canvas, txt_frame, t_lbl, sub_lbl):
+                w.bind("<Button-1>", lambda e, k=key: self.select_resource_tab(k))
+
+            self.nav_cards[key] = {
+                "card": card,
+                "accent": accent_bar,
+                "canvas": mini_canvas,
+                "txt_frame": txt_frame,
+                "title": t_lbl,
+                "sub": sub_lbl,
+            }
+
+        # Right Main Pane Header (Big Title on Left, Process/Hardware Name on Right)
+        self.pane_header = tk.Frame(self.main_pane)
+        self.pane_header.pack(fill="x", pady=(0, 2))
+
+        self.pane_title_lbl = tk.Label(
+            self.pane_header, text="CPU", font=("Segoe UI", 16, "bold"), anchor="w"
+        )
+        self.pane_title_lbl.pack(side="left")
+
+        self.pane_hw_lbl = tk.Label(
+            self.pane_header,
+            text=f"Danbooru Wallpaper Process Tree ({self.monitor.logical_cpus} Logical Processors)",
+            font=("Segoe UI", 9),
+            anchor="e",
+        )
+        self.pane_hw_lbl.pack(side="right", pady=(6, 0))
+
+        # Top Axis Labels above Graph
+        self.axis_top_row = tk.Frame(self.main_pane)
+        self.axis_top_row.pack(fill="x", pady=(2, 2))
+
+        self.axis_top_left_lbl = tk.Label(
+            self.axis_top_row, text="% Utilization", font=("Segoe UI", 8)
+        )
+        self.axis_top_left_lbl.pack(side="left")
+
+        self.axis_top_right_lbl = tk.Label(
+            self.axis_top_row, text="100%", font=("Segoe UI", 8)
+        )
+        self.axis_top_right_lbl.pack(side="right")
+
+        # Main Task Manager Scrolling Graph Canvas
+        self.graph_canvas = tk.Canvas(
+            self.main_pane, bd=0, highlightthickness=1, height=235
+        )
+        self.graph_canvas.pack(fill="both", expand=True)
+
+        # Bottom Axis Labels ("60 seconds" ... "0")
+        self.axis_bot_row = tk.Frame(self.main_pane)
+        self.axis_bot_row.pack(fill="x", pady=(2, 8))
+
+        self.axis_bot_left_lbl = tk.Label(
+            self.axis_bot_row, text="60 seconds", font=("Segoe UI", 8)
+        )
+        self.axis_bot_left_lbl.pack(side="left")
+
+        self.axis_bot_right_lbl = tk.Label(
+            self.axis_bot_row, text="0", font=("Segoe UI", 8)
+        )
+        self.axis_bot_right_lbl.pack(side="right")
+
+        # Bottom Telemetry Readout Columns (Windows Task Manager style with vertical colored bars)
+        self.stats_row = tk.Frame(self.main_pane)
+        self.stats_row.pack(fill="x", pady=(2, 0))
+
+        self.stat_blocks = {}
+        stat_defs = [
+            ("primary", "Utilization", "0.0%"),
+            ("secondary", "Wallpaper Memory", "0.0 MB"),
+            ("peak", "Peak Recorded", "0.0%"),
+            ("procs", "Processes / Threads", "1 / 1"),
+        ]
+        for s_key, s_title, s_init in stat_defs:
+            blk = tk.Frame(self.stats_row)
+            blk.pack(side="left", fill="x", expand=True, padx=(0, 8))
+
+            bar = tk.Frame(blk, width=3)
+            bar.pack(side="left", fill="y", padx=(0, 6), pady=2)
+
+            inner = tk.Frame(blk)
+            inner.pack(side="left", fill="x", expand=True)
+
+            k_lbl = tk.Label(inner, text=s_title, font=("Segoe UI", 8), anchor="w")
+            k_lbl.pack(fill="x")
+
+            v_lbl = tk.Label(inner, text=s_init, font=("Segoe UI", 13, "bold"), anchor="w")
+            v_lbl.pack(fill="x")
+
+            self.stat_blocks[s_key] = {
+                "frame": blk,
+                "bar": bar,
+                "inner": inner,
+                "k_lbl": k_lbl,
+                "v_lbl": v_lbl,
+            }
+
+        self.apply_theme()
+        self.bind("<Escape>", lambda e: self.close_resource_graph())
+        self.graph_canvas.bind("<Configure>", lambda e: self._redraw_all_graphs())
+        self._tick_telemetry()
+
+    def select_resource_tab(self, tab_key: str):
+        self.selected_tab = tab_key
+        self.apply_theme()
+        self._redraw_all_graphs()
+
+    def _toggle_pause_graph(self):
+        self._graph_paused = not self._graph_paused
+        self.pause_graph_btn.configure(
+            text="▶ Resume Graph" if self._graph_paused else "⏸ Pause Graph"
+        )
+
+    def _get_ram_scale_ceiling_mb(self) -> float:
+        peak_seen = max(max(self.monitor.ram_mb_history, default=128.0), 128.0)
+        for step in (256.0, 512.0, 1024.0, 2048.0, 4096.0, 8192.0, 16384.0):
+            if peak_seen <= step * 0.85:
+                return step
+        return max(1024.0, round(peak_seen * 1.25, -2))
+
+    def apply_theme(self):
+        is_dark = (CURRENT_THEME == "dark")
+        pal = THEME_PALETTES[CURRENT_THEME]
+        bg_base = pal["bg_base"]
+        card_bg = "#18181f" if is_dark else "#ffffff"
+        card_sel_bg = "#232733" if is_dark else "#e6f2fc"
+        border_col = pal["border_col"]
+        text_dark = pal["text_dark"]
+        text_muted = pal["text_muted"]
+        graph_bg = "#0c0d12" if is_dark else "#ffffff"
+
+        self.configure(bg=border_col)
+        self.container.configure(bg=bg_base, highlightbackground=border_col)
+        self.header.configure(bg=bg_base)
+        self.title_lbl.configure(bg=bg_base, fg=text_dark)
+        self.close_btn.configure(bg=bg_base, fg=text_muted)
+        self.pause_graph_btn.configure(
+            bg=pal["btn_bg"],
+            fg=text_dark,
+            activebackground=pal["btn_active"],
+            activeforeground=text_dark,
+        )
+        self.sep_top.configure(bg=border_col)
+        self.body.configure(bg=bg_base)
+        self.sidebar.configure(bg=bg_base)
+        self.main_pane.configure(bg=bg_base)
+
+        for key, item in self.nav_cards.items():
+            is_sel = (key == self.selected_tab)
+            c_bg = card_sel_bg if is_sel else card_bg
+            spec_key = "cpu" if key == "all" else key
+            spec = self.RESOURCE_SPECS[spec_key]
+            stroke_col = spec["stroke_dark"] if is_dark else spec["stroke_light"]
+
+            item["card"].configure(
+                bg=c_bg,
+                highlightbackground=stroke_col if is_sel else border_col,
+            )
+            item["accent"].configure(bg=stroke_col if is_sel else c_bg)
+            item["canvas"].configure(bg=graph_bg, highlightbackground=stroke_col)
+            item["txt_frame"].configure(bg=c_bg)
+            item["title"].configure(bg=c_bg, fg=text_dark)
+            item["sub"].configure(bg=c_bg, fg=text_muted)
+
+        self.pane_header.configure(bg=bg_base)
+        self.pane_title_lbl.configure(bg=bg_base, fg=text_dark)
+        self.pane_hw_lbl.configure(bg=bg_base, fg=text_muted)
+
+        self.axis_top_row.configure(bg=bg_base)
+        self.axis_top_left_lbl.configure(bg=bg_base, fg=text_muted)
+        self.axis_top_right_lbl.configure(bg=bg_base, fg=text_muted)
+
+        active_spec = self.RESOURCE_SPECS.get(self.selected_tab, self.RESOURCE_SPECS["cpu"])
+        active_stroke = active_spec["stroke_dark"] if is_dark else active_spec["stroke_light"]
+        self.graph_canvas.configure(bg=graph_bg, highlightbackground=active_stroke)
+
+        self.axis_bot_row.configure(bg=bg_base)
+        self.axis_bot_left_lbl.configure(bg=bg_base, fg=text_muted)
+        self.axis_bot_right_lbl.configure(bg=bg_base, fg=text_muted)
+
+        self.stats_row.configure(bg=bg_base)
+        for s_key, blk in self.stat_blocks.items():
+            blk["frame"].configure(bg=bg_base)
+            blk["bar"].configure(bg=active_stroke)
+            blk["inner"].configure(bg=bg_base)
+            blk["k_lbl"].configure(bg=bg_base, fg=text_muted)
+            blk["v_lbl"].configure(bg=bg_base, fg=text_dark)
+
+    def _draw_task_manager_series(
+        self,
+        canvas: tk.Canvas,
+        x0: float,
+        y0: float,
+        w: float,
+        h: float,
+        values: list[float],
+        max_val: float,
+        stroke_col: str,
+        fill_col: str,
+        grid_col: str,
+        draw_grid: bool = True,
+        label_overlay: str = "",
+    ):
+        if w <= 4 or h <= 4:
+            return
+        max_val = max(1.0, float(max_val))
+
+        if draw_grid:
+            # Horizontal 10% subdivisions
+            rows = 10 if h >= 120 else 4
+            for r in range(1, rows):
+                gy = y0 + (h * r / rows)
+                canvas.create_line(x0, gy, x0 + w, gy, fill=grid_col, width=1)
+
+            # Vertical scrolling time gridlines (Task Manager style)
+            cols = 12 if w >= 240 else 4
+            col_spacing = w / cols
+            offset_px = (self._grid_scroll_step % 6) * (col_spacing / 6.0)
+            gx = x0 + w - offset_px
+            while gx > x0:
+                canvas.create_line(gx, y0, gx, y0 + h, fill=grid_col, width=1)
+                gx -= col_spacing
+
+        n = len(values)
+        if n >= 2:
+            step_x = w / float(self.monitor.HISTORY_LEN - 1)
+            start_idx_offset = self.monitor.HISTORY_LEN - n
+            pts = []
+            for idx, v in enumerate(values):
+                clamped = max(0.0, min(max_val, float(v)))
+                px = x0 + (start_idx_offset + idx) * step_x
+                py = y0 + h - (clamped / max_val) * (h - 2.0) - 1.0
+                pts.append((px, py))
+
+            poly_coords = [pts[0][0], y0 + h]
+            for px, py in pts:
+                poly_coords.extend([px, py])
+            poly_coords.extend([pts[-1][0], y0 + h])
+            canvas.create_polygon(poly_coords, fill=fill_col, outline="")
+
+            line_coords = []
+            for px, py in pts:
+                line_coords.extend([px, py])
+            canvas.create_line(line_coords, fill=stroke_col, width=2, smooth=False)
+
+        canvas.create_rectangle(x0, y0, x0 + w - 1, y0 + h - 1, outline=stroke_col, width=1)
+        if label_overlay:
+            is_dark = (CURRENT_THEME == "dark")
+            txt_col = "#e8e8f0" if is_dark else "#1c1c1c"
+            canvas.create_text(
+                x0 + 8, y0 + 8, text=label_overlay, anchor="nw",
+                fill=txt_col, font=("Segoe UI", 8, "bold")
+            )
+
+    def _redraw_all_graphs(self):
+        if not self.is_open:
+            return
+        is_dark = (CURRENT_THEME == "dark")
+        total_phys_mb = max(1024.0, float(self.monitor.total_phys_mb))
+        total_phys_gb = total_phys_mb / 1024.0
+
+        # 1. Update Left Sidebar Mini Sparklines & Subtitles (All scaled 0% - 100% of total capacity)
+        self.nav_cards["cpu"]["sub"].configure(text=f"{self.monitor.current_cpu_pct:.1f}%")
+        self.nav_cards["ram"]["sub"].configure(
+            text=f"{self.monitor.current_ram_mb:.1f} MB ({self.monitor.current_ram_pct:.1f}%)"
+        )
+        self.nav_cards["gpu"]["sub"].configure(text=f"{self.monitor.current_gpu_pct:.1f}%")
+        self.nav_cards["all"]["sub"].configure(
+            text=f"CPU {self.monitor.current_cpu_pct:.0f}% | GPU {self.monitor.current_gpu_pct:.0f}%"
+        )
+
+        mini_series_map = {
+            "cpu": (list(self.monitor.cpu_history), 100.0, "cpu"),
+            "ram": (list(self.monitor.ram_pct_history), 100.0, "ram"),
+            "gpu": (list(self.monitor.gpu_history), 100.0, "gpu"),
+            "all": (list(self.monitor.cpu_history), 100.0, "cpu"),
+        }
+        for key, (vals, m_val, s_key) in mini_series_map.items():
+            mc = self.nav_cards[key]["canvas"]
+            mc.delete("all")
+            mw = max(60, mc.winfo_width())
+            mh = max(42, mc.winfo_height())
+            spec = self.RESOURCE_SPECS[s_key]
+            self._draw_task_manager_series(
+                mc,
+                0,
+                0,
+                mw,
+                mh,
+                vals,
+                m_val,
+                spec["stroke_dark"] if is_dark else spec["stroke_light"],
+                spec["fill_dark"] if is_dark else spec["fill_light"],
+                spec["grid_dark"] if is_dark else spec["grid_light"],
+                draw_grid=False,
+            )
+
+        # 2. Update Main Graph Canvas & Header Readouts
+        self.graph_canvas.delete("all")
+        cw = max(200, self.graph_canvas.winfo_width())
+        ch = max(140, self.graph_canvas.winfo_height())
+
+        if self.selected_tab == "all":
+            self.pane_title_lbl.configure(text="CPU / Memory / GPU")
+            self.pane_hw_lbl.configure(
+                text=f"Wallpaper App Process Tree ({self.monitor.process_count} Processes)"
+            )
+            self.axis_top_left_lbl.configure(text="Stacked Real-Time Telemetry (60s Window)")
+            self.axis_top_right_lbl.configure(
+                text=f"100% Scale ({total_phys_gb:.1f} GB Total System RAM)"
+            )
+
+            gap = 8
+            band_h = (ch - gap * 2) / 3.0
+            bands = [
+                (
+                    "cpu",
+                    list(self.monitor.cpu_history),
+                    100.0,
+                    f"CPU — {self.monitor.current_cpu_pct:.1f}%",
+                ),
+                (
+                    "ram",
+                    list(self.monitor.ram_pct_history),
+                    100.0,
+                    f"Memory — {self.monitor.current_ram_mb:.1f} MB / {int(total_phys_mb):,} MB ({self.monitor.current_ram_pct:.1f}%)",
+                ),
+                (
+                    "gpu",
+                    list(self.monitor.gpu_history),
+                    100.0,
+                    f"GPU 0 — {self.monitor.current_gpu_pct:.1f}% ({self.monitor.gpu_name})",
+                ),
+            ]
+            for idx, (s_key, vals, m_val, overlay_txt) in enumerate(bands):
+                spec = self.RESOURCE_SPECS[s_key]
+                y_top = idx * (band_h + gap)
+                self._draw_task_manager_series(
+                    self.graph_canvas,
+                    0,
+                    y_top,
+                    cw,
+                    band_h,
+                    vals,
+                    m_val,
+                    spec["stroke_dark"] if is_dark else spec["stroke_light"],
+                    spec["fill_dark"] if is_dark else spec["fill_light"],
+                    spec["grid_dark"] if is_dark else spec["grid_light"],
+                    draw_grid=True,
+                    label_overlay=overlay_txt,
+                )
+        else:
+            spec = self.RESOURCE_SPECS[self.selected_tab]
+            if self.selected_tab == "cpu":
+                vals = list(self.monitor.cpu_history)
+                m_val = 100.0
+                self.pane_title_lbl.configure(text="CPU")
+                self.pane_hw_lbl.configure(
+                    text=f"Danbooru Wallpaper Process Tree ({self.monitor.logical_cpus} Logical Processors)"
+                )
+                self.axis_top_left_lbl.configure(text="% Utilization")
+                self.axis_top_right_lbl.configure(text="100%")
+            elif self.selected_tab == "ram":
+                vals = list(self.monitor.ram_pct_history)
+                m_val = 100.0
+                self.pane_title_lbl.configure(text="Memory")
+                self.pane_hw_lbl.configure(
+                    text=f"Working Set + WebView2 Buffers ({total_phys_gb:.1f} GB / {int(total_phys_mb):,} MB System RAM)"
+                )
+                self.axis_top_left_lbl.configure(
+                    text=f"% of Total System Memory ({self.monitor.current_ram_mb:.1f} MB / {int(total_phys_mb):,} MB)"
+                )
+                self.axis_top_right_lbl.configure(text=f"100% ({total_phys_gb:.1f} GB)")
+            else:
+                vals = list(self.monitor.gpu_history)
+                m_val = 100.0
+                self.pane_title_lbl.configure(text="GPU 0")
+                self.pane_hw_lbl.configure(text=self.monitor.gpu_name)
+                self.axis_top_left_lbl.configure(text="% Utilization (3D / Compositor / Video Decode)")
+                self.axis_top_right_lbl.configure(text="100%")
+
+            self._draw_task_manager_series(
+                self.graph_canvas,
+                0,
+                0,
+                cw,
+                ch,
+                vals,
+                m_val,
+                spec["stroke_dark"] if is_dark else spec["stroke_light"],
+                spec["fill_dark"] if is_dark else spec["fill_light"],
+                spec["grid_dark"] if is_dark else spec["grid_light"],
+                draw_grid=True,
+            )
+
+        # 3. Update Bottom Task Manager Telemetry Readout Labels
+        if self.selected_tab == "ram":
+            self.stat_blocks["primary"]["k_lbl"].configure(text="Working Set (RAM)")
+            self.stat_blocks["primary"]["v_lbl"].configure(
+                text=f"{self.monitor.current_ram_mb:.1f} MB ({self.monitor.current_ram_pct:.1f}%)"
+            )
+            self.stat_blocks["secondary"]["k_lbl"].configure(text="Private Commit")
+            self.stat_blocks["secondary"]["v_lbl"].configure(
+                text=f"{self.monitor.current_private_mb:.1f} MB"
+            )
+            self.stat_blocks["peak"]["k_lbl"].configure(text="Peak Working Set")
+            self.stat_blocks["peak"]["v_lbl"].configure(text=f"{self.monitor.peak_ram_mb:.1f} MB")
+        elif self.selected_tab == "gpu":
+            self.stat_blocks["primary"]["k_lbl"].configure(text="GPU Utilization")
+            self.stat_blocks["primary"]["v_lbl"].configure(text=f"{self.monitor.current_gpu_pct:.1f}%")
+            self.stat_blocks["secondary"]["k_lbl"].configure(text="Wallpaper Memory")
+            self.stat_blocks["secondary"]["v_lbl"].configure(text=f"{self.monitor.current_ram_mb:.1f} MB")
+            self.stat_blocks["peak"]["k_lbl"].configure(text="Peak GPU Load")
+            self.stat_blocks["peak"]["v_lbl"].configure(text=f"{self.monitor.peak_gpu_pct:.1f}%")
+        else:
+            self.stat_blocks["primary"]["k_lbl"].configure(text="CPU Utilization")
+            self.stat_blocks["primary"]["v_lbl"].configure(text=f"{self.monitor.current_cpu_pct:.1f}%")
+            self.stat_blocks["secondary"]["k_lbl"].configure(text="Wallpaper Memory")
+            self.stat_blocks["secondary"]["v_lbl"].configure(
+                text=f"{self.monitor.current_ram_mb:.1f} MB"
+            )
+            self.stat_blocks["peak"]["k_lbl"].configure(text="Peak CPU / GPU")
+            self.stat_blocks["peak"]["v_lbl"].configure(
+                text=f"{self.monitor.peak_cpu_pct:.1f}% / {self.monitor.peak_gpu_pct:.1f}%"
+            )
+
+        self.stat_blocks["procs"]["k_lbl"].configure(text="Processes / Threads")
+        self.stat_blocks["procs"]["v_lbl"].configure(
+            text=f"{self.monitor.process_count} / {self.monitor.thread_count}"
+        )
+
+    def _tick_telemetry(self):
+        if not self.is_open:
+            return
+        if not self._graph_paused:
+            self.monitor.sample()
+            self._grid_scroll_step += 1
+            self._redraw_all_graphs()
+        self._tick_job = self.after(1000, self._tick_telemetry)
+
+    def start_move(self, event):
+        self._drag_x = event.x
+        self._drag_y = event.y
+
+    def do_move(self, event):
+        x = self.winfo_x() + (event.x - self._drag_x)
+        y = self.winfo_y() + (event.y - self._drag_y)
+        self.geometry(f"+{x}+{y}")
+
+    def close_resource_graph(self):
+        self.is_open = False
+        if self._tick_job is not None:
+            try:
+                self.after_cancel(self._tick_job)
+            except Exception:
+                pass
+            self._tick_job = None
+        try:
+            self.monitor.close()
+        except Exception:
+            pass
+        self.destroy()
+
+
 class SettingsDialog(tk.Toplevel):
     """
     Unified tabbed settings dialog containing:
+    - Top Header: 'Resource Graph' button launching the Windows Task Manager Performance pop-out
     - Tab 1: Credentials (account credentials, search bar lock/unlock, Light/Dark Mode toggle)
     - Tab 2: Display (per-screen selector, enable checkbox, dynamic mode-specific section visibility)
     - Tab 3: Logs (PAUSE APPLICATION master button, Glossary button, Clear Logs button, smart log history)
@@ -2500,6 +3907,30 @@ class SettingsDialog(tk.Toplevel):
             "min": 0,
             "max": 600,
             "default": 10,
+            "is_float": False,
+            "precision": 0,
+        },
+        "masonrytiles": {
+            "label": "Tile Count (4 – 36):",
+            "min": 4,
+            "max": 36,
+            "default": 12,
+            "is_float": False,
+            "precision": 0,
+        },
+        "masonrygap": {
+            "label": "Gap (0 – 10 px):",
+            "min": 0,
+            "max": 10,
+            "default": 4,
+            "is_float": False,
+            "precision": 0,
+        },
+        "masonrydelay": {
+            "label": "Delay (1 – 60 s):",
+            "min": 1,
+            "max": 60,
+            "default": 5,
             "is_float": False,
             "precision": 0,
         },
@@ -2570,6 +4001,23 @@ class SettingsDialog(tk.Toplevel):
         self.close_btn.pack(side="right")
         self.close_btn.bind("<Button-1>", lambda e: self.close_dialog())
         self._themed_labels_muted.append(self.close_btn)
+
+        self.resource_graph_btn = tk.Button(
+            self.header,
+            text="📊 Resource Graph",
+            bg="#0067c0",
+            fg="#ffffff",
+            activebackground="#005da6",
+            activeforeground="#ffffff",
+            font=("Segoe UI", 8, "bold"),
+            bd=0,
+            relief="flat",
+            padx=12,
+            pady=3,
+            cursor="hand2",
+            command=self.open_resource_graph_dialog,
+        )
+        self.resource_graph_btn.pack(side="right", padx=(0, 12))
 
         self.header.bind("<Button-1>", self.start_move)
         self.header.bind("<B1-Motion>", self.do_move)
@@ -2723,6 +4171,12 @@ class SettingsDialog(tk.Toplevel):
                 GLOSSARY_DIALOG_INSTANCE.apply_theme()
             except Exception:
                 pass
+        if RESOURCE_GRAPH_DIALOG_INSTANCE and getattr(RESOURCE_GRAPH_DIALOG_INSTANCE, "is_open", False):
+            try:
+                RESOURCE_GRAPH_DIALOG_INSTANCE.apply_theme()
+                RESOURCE_GRAPH_DIALOG_INSTANCE._redraw_all_graphs()
+            except Exception:
+                pass
         log_event("ui", f"Switched application theme to {CURRENT_THEME.upper()} mode.")
 
     def save_credentials_only(self):
@@ -2732,7 +4186,7 @@ class SettingsDialog(tk.Toplevel):
         self.on_save_credentials_callback(user, uid, key)
 
     # -------------------------------------------------------------------------
-    # TAB 2: DISPLAY (DYNAMIC PER-MODE SECTIONS: SCROLL | COLLAGE | SLIDESHOW)
+    # TAB 2: DISPLAY (DYNAMIC PER-MODE SECTIONS: SCROLL | POLAROID | SLIDESHOW | MASONRY)
     # -------------------------------------------------------------------------
     def _build_display_tab(self):
         self.prop_entries = {}
@@ -2800,7 +4254,7 @@ class SettingsDialog(tk.Toplevel):
         self.mode_combo = ttk.Combobox(
             mode_row,
             textvariable=self.mode_var,
-            values=["scroll", "collage", "slideshow"],
+            values=["scroll", "polaroid", "slideshow", "masonry"],
             state="readonly",
         )
         self.mode_combo.pack(side="right", fill="x", expand=True)
@@ -2853,26 +4307,26 @@ class SettingsDialog(tk.Toplevel):
         for pkey in ("scrollspeed", "gapsize"):
             self._create_numeric_row(self.scroll_section_frame, pkey, self.NUMERIC_SPECS[pkey])
 
-        # 2. COLLAGE MODE SECTION
-        self.collage_section_frame = tk.Frame(self.mode_sections_holder, bg=self.bg_base)
-        self._themed_frames.append(self.collage_section_frame)
+        # 2. POLAROID MODE SECTION
+        self.polaroid_section_frame = tk.Frame(self.mode_sections_holder, bg=self.bg_base)
+        self._themed_frames.append(self.polaroid_section_frame)
 
-        collage_hdr = tk.Label(
-            self.collage_section_frame, text="POLAROID COLLAGE SETTINGS",
+        polaroid_hdr = tk.Label(
+            self.polaroid_section_frame, text="POLAROID SETTINGS",
             font=("Segoe UI", 8, "bold"), fg=self.text_muted, bg=self.bg_base
         )
-        collage_hdr.pack(anchor="w", pady=(4, 4))
-        self._themed_labels_muted.append(collage_hdr)
+        polaroid_hdr.pack(anchor="w", pady=(4, 4))
+        self._themed_labels_muted.append(polaroid_hdr)
 
         for pkey in ("dropspeed", "minsize", "maxsize", "dropdelay"):
-            self._create_numeric_row(self.collage_section_frame, pkey, self.NUMERIC_SPECS[pkey])
+            self._create_numeric_row(self.polaroid_section_frame, pkey, self.NUMERIC_SPECS[pkey])
 
-        fill_row = tk.Frame(self.collage_section_frame, bg=self.bg_base)
+        fill_row = tk.Frame(self.polaroid_section_frame, bg=self.bg_base)
         fill_row.pack(fill="x", pady=(8, 4))
         self._themed_frames.append(fill_row)
 
         fill_lbl = tk.Label(
-            fill_row, text="Collage Action:", width=26, anchor="w",
+            fill_row, text="Polaroid Action:", width=26, anchor="w",
             font=("Segoe UI", 9), fg=self.text_dark, bg=self.bg_base
         )
         fill_lbl.pack(side="left")
@@ -2919,6 +4373,61 @@ class SettingsDialog(tk.Toplevel):
         slide_note.pack(anchor="w", pady=(8, 2))
         self._themed_labels_muted.append(slide_note)
 
+        # 4. MASONRY MODE SECTION
+        self.masonry_section_frame = tk.Frame(self.mode_sections_holder, bg=self.bg_base)
+        self._themed_frames.append(self.masonry_section_frame)
+
+        masonry_hdr = tk.Label(
+            self.masonry_section_frame,
+            text="MASONRY LAYOUT SETTINGS (UNCROPPED 3D Y-AXIS FLIP & REFLOW)",
+            font=("Segoe UI", 8, "bold"), fg=self.text_muted, bg=self.bg_base
+        )
+        masonry_hdr.pack(anchor="w", pady=(4, 4))
+        self._themed_labels_muted.append(masonry_hdr)
+
+        layout_row = tk.Frame(self.masonry_section_frame, bg=self.bg_base)
+        layout_row.pack(fill="x", pady=(2, 5))
+        self._themed_frames.append(layout_row)
+
+        layout_lbl = tk.Label(
+            layout_row, text="Masonry Layout:", width=26, anchor="w",
+            font=("Segoe UI", 9), fg=self.text_dark, bg=self.bg_base
+        )
+        layout_lbl.pack(side="left")
+        self._themed_labels_dark.append(layout_lbl)
+
+        self.masonry_layout_var = tk.StringVar(value="mondrian")
+        self.masonry_layout_btn = tk.Button(
+            layout_row,
+            text="Mondrian  ⇄",
+            bg="#0067c0",
+            fg="#ffffff",
+            activebackground="#005da6",
+            activeforeground="#ffffff",
+            font=("Segoe UI", 9, "bold"),
+            bd=0,
+            relief="flat",
+            padx=12,
+            pady=4,
+            cursor="hand2",
+            command=self._on_toggle_masonry_layout,
+        )
+        self.masonry_layout_btn.pack(side="right", fill="x", expand=True)
+
+        for pkey in ("masonrytiles", "masonrygap", "masonrydelay"):
+            self._create_numeric_row(self.masonry_section_frame, pkey, self.NUMERIC_SPECS[pkey])
+
+        masonry_note = tk.Label(
+            self.masonry_section_frame,
+            text="• Layout Button: Toggle live between 'Mondrian' (BSP Solver) and 'Rows' (Justified Google Photos Rows).\n"
+                 "• Next Media Pre-Staging: Pre-decodes & pre-solves the next flip in the background with zero memory bloat.\n"
+                 "• Animated GIFs and MP4 videos play through completely at least once before flipping.",
+            justify="left", anchor="w",
+            font=("Segoe UI", 8), fg=self.text_muted, bg=self.bg_base
+        )
+        masonry_note.pack(anchor="w", pady=(8, 2))
+        self._themed_labels_muted.append(masonry_note)
+
         btn_row = tk.Frame(pad_frame, bg=self.bg_base)
         btn_row.pack(fill="x", side="bottom", pady=(6, 0))
         self._themed_frames.append(btn_row)
@@ -2936,16 +4445,19 @@ class SettingsDialog(tk.Toplevel):
     def _update_mode_sections_visibility(self):
         """Hides all display mode settings sections except the currently selected display mode."""
         self.scroll_section_frame.pack_forget()
-        self.collage_section_frame.pack_forget()
+        self.polaroid_section_frame.pack_forget()
         self.slideshow_section_frame.pack_forget()
+        self.masonry_section_frame.pack_forget()
 
-        active_mode = self.mode_var.get()
+        active_mode = _normalize_display_mode_value(self.mode_var.get())
         if active_mode == "scroll":
             self.scroll_section_frame.pack(fill="both", expand=True)
-        elif active_mode == "collage":
-            self.collage_section_frame.pack(fill="both", expand=True)
+        elif active_mode == "polaroid":
+            self.polaroid_section_frame.pack(fill="both", expand=True)
         elif active_mode == "slideshow":
             self.slideshow_section_frame.pack(fill="both", expand=True)
+        elif active_mode == "masonry":
+            self.masonry_section_frame.pack(fill="both", expand=True)
 
     def _format_numeric_value(self, pkey, val):
         spec = self.NUMERIC_SPECS[pkey]
@@ -3135,20 +4647,38 @@ class SettingsDialog(tk.Toplevel):
         sid = self._get_current_selected_screen_id()
         self._load_screen_values_into_form(sid)
 
+    def _update_masonry_layout_btn_label(self):
+        cur = _normalize_masonry_layout_value(self.masonry_layout_var.get())
+        if cur == "rows":
+            self.masonry_layout_btn.configure(text="Rows  ⇄")
+        else:
+            self.masonry_layout_btn.configure(text="Mondrian  ⇄")
+
+    def _on_toggle_masonry_layout(self):
+        cur = _normalize_masonry_layout_value(self.masonry_layout_var.get())
+        new_layout = "rows" if cur == "mondrian" else "mondrian"
+        self.masonry_layout_var.set(new_layout)
+        self._update_masonry_layout_btn_label()
+        readable = "Rows" if new_layout == "rows" else "Mondrian"
+        log_event("ui", f"Switched Masonry layout setting to: {readable}")
+        self._schedule_live_apply()
+
     def _load_screen_values_into_form(self, screen_id):
         sc_cfg = get_screen_config(screen_id)
         self.screen_enabled_var.set(sc_cfg["enabled"])
         props = sc_cfg["properties"]
 
-        mode_val = props.get("displaymode", {}).get("value", "scroll")
-        if mode_val not in ("scroll", "collage", "slideshow"):
-            mode_val = "scroll"
+        mode_val = _normalize_display_mode_value(props.get("displaymode", {}).get("value", "scroll"))
         self.mode_var.set(mode_val)
 
         dir_val = props.get("scrolldirection", {}).get("value", "left")
         if dir_val not in ("left", "right", "up", "down"):
             dir_val = "left"
         self.dir_var.set(dir_val)
+
+        ml_val = _normalize_masonry_layout_value(props.get("masonrylayout", {}).get("value", "mondrian"))
+        self.masonry_layout_var.set(ml_val)
+        self._update_masonry_layout_btn_label()
 
         self._syncing_controls = True
         try:
@@ -3172,14 +4702,14 @@ class SettingsDialog(tk.Toplevel):
         self._update_fill_btn_state()
 
     def _update_fill_btn_state(self):
-        is_collage = (self.mode_var.get() == "collage")
-        if is_collage and self._fill_cooldown_remaining <= 0:
+        is_polaroid = (_normalize_display_mode_value(self.mode_var.get()) == "polaroid")
+        if is_polaroid and self._fill_cooldown_remaining <= 0:
             self.fill_screen_btn.configure(state="normal", bg="#0067c0", cursor="hand2")
         else:
             self.fill_screen_btn.configure(state="disabled", bg="#555560" if CURRENT_THEME == "dark" else "#c8c8d0", cursor="arrow")
 
     def _on_fill_screen_clicked(self):
-        if self.mode_var.get() != "collage" or self._fill_cooldown_remaining > 0:
+        if _normalize_display_mode_value(self.mode_var.get()) != "polaroid" or self._fill_cooldown_remaining > 0:
             return
         self.save_display_settings()
         sid = self._get_current_selected_screen_id()
@@ -3213,11 +4743,17 @@ class SettingsDialog(tk.Toplevel):
             "properties": json.loads(json.dumps(base_props)),
         })
 
-        screen_entry["enabled"] = bool(self.screen_enabled_var.get())
+        prev_enabled = _LAST_SCREEN_ENABLED_STATE.get(sid, screen_entry.get("enabled", True))
+        new_enabled = bool(self.screen_enabled_var.get())
+        _LAST_SCREEN_ENABLED_STATE[sid] = new_enabled
+        enabled_changed = (prev_enabled != new_enabled)
+
+        screen_entry["enabled"] = new_enabled
         s_props = screen_entry.setdefault("properties", json.loads(json.dumps(base_props)))
 
         s_props.setdefault("displaymode", {})["value"] = self.mode_var.get()
         s_props.setdefault("scrolldirection", {})["value"] = self.dir_var.get()
+        s_props.setdefault("masonrylayout", {})["value"] = _normalize_masonry_layout_value(self.masonry_layout_var.get())
 
         self._syncing_controls = True
         try:
@@ -3244,7 +4780,7 @@ class SettingsDialog(tk.Toplevel):
                     base_props[k]["value"] = val_obj["value"]
 
         store_project_json(project_data)
-        push_properties_to_webview(sid)
+        push_properties_to_webview(sid, sync_geometry=enabled_changed)
         self._update_fill_btn_state()
 
     # -------------------------------------------------------------------------
@@ -3308,6 +4844,17 @@ class SettingsDialog(tk.Toplevel):
             self.log_text.insert(tk.END, "\n".join(LOG_HISTORY) + "\n")
             self.log_text.see(tk.END)
             self.log_text.configure(state="disabled")
+
+    def open_resource_graph_dialog(self):
+        global RESOURCE_GRAPH_DIALOG_INSTANCE
+        if RESOURCE_GRAPH_DIALOG_INSTANCE and getattr(RESOURCE_GRAPH_DIALOG_INSTANCE, "is_open", False):
+            try:
+                RESOURCE_GRAPH_DIALOG_INSTANCE.lift()
+                return
+            except tk.TclError:
+                pass
+        RESOURCE_GRAPH_DIALOG_INSTANCE = ResourceGraphDialog(self.master)
+        log_event("perf", "Opened Task Manager Resource Graph pop-out window.")
 
     def open_glossary_dialog(self):
         global GLOSSARY_DIALOG_INSTANCE
@@ -3481,7 +5028,7 @@ class FloatingSearchBar:
         self.root.attributes("-alpha", 0.92)
         self.root.attributes("-topmost", True)
 
-        self.bar_width = 680
+        self.bar_width = 740
         self.bar_height = 48
 
         self.config = load_app_config()
@@ -3553,7 +5100,53 @@ class FloatingSearchBar:
             pady=4,
             command=self.toggle_wallpaper_pause
         )
-        self.pause_btn.pack(side="right", padx=(2, 6), pady=7)
+        self.pause_btn.pack(side="right", padx=(4, 6), pady=7)
+
+        # Vertical rectangle "Next" button (to the right of Previous & Refresh)
+        self.next_btn_frame = tk.Frame(
+            self.main_frame, bg=pal["btn_bg"], highlightthickness=1, highlightbackground=self.border_col,
+            width=22, height=36
+        )
+        self.next_btn_frame.pack(side="right", padx=(2, 2), pady=5)
+        self.next_btn_frame.pack_propagate(False)
+
+        self.next_btn = tk.Button(
+            self.next_btn_frame,
+            text="▶",
+            fg=self.text_dark,
+            bg=pal["btn_bg"],
+            activebackground=pal["btn_active"],
+            activeforeground="#0067c0",
+            bd=0,
+            relief="flat",
+            font=("Segoe UI", 8, "bold"),
+            cursor="hand2",
+            command=self.next_media
+        )
+        self.next_btn.pack(fill="both", expand=True)
+
+        # Vertical rectangle "Previous" button (immediately to the right of Refresh)
+        self.prev_btn_frame = tk.Frame(
+            self.main_frame, bg=pal["btn_bg"], highlightthickness=1, highlightbackground=self.border_col,
+            width=22, height=36
+        )
+        self.prev_btn_frame.pack(side="right", padx=(2, 2), pady=5)
+        self.prev_btn_frame.pack_propagate(False)
+
+        self.prev_btn = tk.Button(
+            self.prev_btn_frame,
+            text="◀",
+            fg=self.text_dark,
+            bg=pal["btn_bg"],
+            activebackground=pal["btn_active"],
+            activeforeground="#0067c0",
+            bd=0,
+            relief="flat",
+            font=("Segoe UI", 8, "bold"),
+            cursor="hand2",
+            command=self.previous_media
+        )
+        self.prev_btn.pack(fill="both", expand=True)
 
         self.refresh_btn = tk.Button(
             self.main_frame, text="⟳", fg=self.text_dark, bg=self.bg_base, activebackground=pal["btn_active"],
@@ -3648,6 +5241,11 @@ class FloatingSearchBar:
         self.tag_label.configure(bg=self.bg_base, fg=self.text_dark)
         self.refresh_btn.configure(bg=self.bg_base, fg=self.text_dark, activebackground=pal["btn_active"])
 
+        self.prev_btn_frame.configure(bg=pal["btn_bg"], highlightbackground=self.border_col)
+        self.prev_btn.configure(bg=pal["btn_bg"], fg=self.text_dark, activebackground=pal["btn_active"])
+        self.next_btn_frame.configure(bg=pal["btn_bg"], highlightbackground=self.border_col)
+        self.next_btn.configure(bg=pal["btn_bg"], fg=self.text_dark, activebackground=pal["btn_active"])
+
         if WALLPAPER_PAUSED:
             self.pause_btn.configure(bg="#0067c0", fg="#ffffff", activebackground="#005da6")
         else:
@@ -3667,6 +5265,39 @@ class FloatingSearchBar:
         self.saved_dropdown.configure(bg=self.border_col)
         if self.saved_dropdown.winfo_viewable():
             self.render_saved_dropdown()
+
+    def _restore_nav_buttons_after_cooldown(self):
+        self._nav_cooldown_active = False
+        try:
+            pal = THEME_PALETTES[CURRENT_THEME]
+            self.prev_btn.configure(fg=self.text_dark, bg=pal["btn_bg"], cursor="hand2")
+            self.next_btn.configure(fg=self.text_dark, bg=pal["btn_bg"], cursor="hand2")
+        except tk.TclError:
+            pass
+
+    def previous_media(self):
+        """Requeues the last shown file to the front of the queue with a 1.0s stress-protection cooldown."""
+        if getattr(self, "_nav_cooldown_active", False):
+            return
+        if not trigger_navigation_on_webviews("prev"):
+            return
+        self._nav_cooldown_active = True
+        pal = THEME_PALETTES[CURRENT_THEME]
+        self.prev_btn.configure(fg="#0067c0", bg=pal["flash_bg"], cursor="arrow")
+        self.next_btn.configure(fg=self.text_muted, cursor="arrow")
+        self.root.after(1000, self._restore_nav_buttons_after_cooldown)
+
+    def next_media(self):
+        """Immediately plays the next queued file across active screens with a 1.0s stress-protection cooldown."""
+        if getattr(self, "_nav_cooldown_active", False):
+            return
+        if not trigger_navigation_on_webviews("next"):
+            return
+        self._nav_cooldown_active = True
+        pal = THEME_PALETTES[CURRENT_THEME]
+        self.next_btn.configure(fg="#0067c0", bg=pal["flash_bg"], cursor="arrow")
+        self.prev_btn.configure(fg=self.text_muted, cursor="arrow")
+        self.root.after(1000, self._restore_nav_buttons_after_cooldown)
 
     def toggle_wallpaper_pause(self):
         global WALLPAPER_PAUSED
@@ -4229,7 +5860,7 @@ def inject_and_sync_screen(screen_info, window, win_title):
             DESKTOP_INJECTED_SET.discard(sid)
         return
 
-    push_properties_to_webview(sid)
+    push_properties_to_webview(sid, sync_geometry=True)
     push_pause_states_to_webviews()
 
 

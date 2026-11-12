@@ -1,6 +1,0 @@
-{
-  "summary": "Implementation plan to fix ModuleNotFoundError for curl_cffi via a hybrid HTTP/2 + stdlib DoH/SNI transport engine, audit all three files for PyInstaller --onefile --noconsole edge cases, and provide updated source files and build instructions.",
-  "updatedAt": "2026-11-03T19:21:46.051614006Z",
-  "requestFeedback": true,
-  "userFacing": true
-}

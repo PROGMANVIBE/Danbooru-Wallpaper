@@ -1,33 +1,43 @@
 # Danbooru Wallpaper Application
 
-A standalone Windows desktop wallpaper application that streams Danbooru artwork, animated GIFs, and silent MP4 videos (`≤ 15 MB`, audio strictly muted) directly behind your desktop icons. Powered by an ephemeral WebView2 renderer and a cookie-free local Python proxy (`http://127.0.0.1:8088/media`) with Cloudflare DNS-over-HTTPS (DoH) resolution, it features three distinct display modes (**Continuous 4-Way Scroll**, **Polaroid Collage**, and **Orientation-Matched Fullscreen Slideshow**), a floating search bar with live tag autocomplete, search bookmarks, Light/Dark mode UI theming, DPAPI-encrypted credentials, real-time diagnostic logs with a built-in Glossary, multi-monitor support, and system tray controls.
+A standalone Windows desktop wallpaper application that streams Danbooru artwork, animated GIFs, and silent MP4 videos (`≤ 15 MB`, audio strictly muted) directly behind your desktop icons. Powered by an ephemeral WebView2 renderer and a cookie-free local Python proxy (`http://127.0.0.1:8088/media`) with Cloudflare DNS-over-HTTPS (DoH) resolution and binary magic-byte security verification, it features four distinct display modes (**Continuous 4-Way Scroll**, **Polaroid**, **Orientation-Matched Fullscreen Slideshow**, and **Dynamic Masonry**), a floating search bar with **Previous (`◀`)** and **Next (`▶`)** media controls and live tag autocomplete, search bookmarks, Light/Dark mode UI theming, DPAPI-encrypted credentials, real-time diagnostic logs with a built-in Glossary, multi-monitor support, and system tray controls.
 
 ---
 
 # FEATURES
 
-- **Ephemeral Zero-Cache Architecture**: Runs WebView2 in strict in-memory private mode (`private_mode=True`) with disk caching disabled and automatically cleans up any legacy `webview_profile` folder.
-- **Full Local Media Proxy (`127.0.0.1:8088/media`)**: All `<img>` and `<video>` elements in the WebView point exclusively to the local Python `/media` proxy endpoint rather than contacting `cdn.donmai.us` directly. WebView2 never makes external network requests, preventing Cloudflare `403 Forbidden` blocks and eliminating browser disk cache creation.
+- **Ephemeral Zero-Cache Architecture**: Runs WebView2 in strict in-memory private mode (`private_mode=True`) with disk caching and file-system APIs disabled and automatically cleans up any legacy `webview_profile` folder.
+- **Full Local Media Proxy & Malware Defense (`127.0.0.1:8088/media`)**:
+  - All `<img>` and `<video>` elements in the WebView point exclusively to the local Python `/media` proxy endpoint rather than contacting `cdn.donmai.us` directly. WebView2 never makes external network requests, preventing Cloudflare `403 Forbidden` blocks and eliminating browser disk cache creation.
+  - **Multi-Layer Anti-Malware & PHP Security Pipeline**:
+    1. **Strict URL Path & Double-Extension Validation**: Rejects any URL containing `.php`, `.phtml`, `.phar`, `.exe`, `.dll`, `.bat`, `.ps1`, `.scr`, `.hta`, `.svg`, `.html`, path traversal (`..`), or extension mismatches before any upstream request is sent.
+    2. **Binary Magic-Byte Header Verification**: Inspects the first chunk of every `/media` stream for authentic `JPEG`, `PNG`, `GIF87a/89a`, `RIFF/WEBP`, or ISO-BMFF `MP4` (`ftyp`) magic numbers and immediately aborts streams containing PHP tags (`<?php`, `<?=`), HTML/SVG script tags, Windows PE executables (`MZ`), ELF binaries, or ZIP/PHAR archives (`PK\x03\x04`).
+    3. **Forced Safe Headers & Strict CSP**: Never trusts upstream `Content-Type` or `Content-Disposition` headers; enforces `Content-Disposition: inline`, `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, and a locked-down `Content-Security-Policy` that blocks WebView downloads and external scripts.
+    4. **Hop-by-Hop Redirect Host Pinning**: Verifies every HTTP redirect hop against the strict `ALLOWED_MEDIA_HOSTS` allowlist (`danbooru.donmai.us`, `cdn.donmai.us`).
 - **Hybrid HTTP/2 & Cloudflare DoH Transport Engine**:
   - Resolves `danbooru.donmai.us` and `cdn.donmai.us` hostnames via Cloudflare's public DNS-over-HTTPS endpoint (`https://cloudflare-dns.com/dns-query` over `1.1.1.1` / `1.0.0.1`) prior to connection, bypassing ISP-level plain-text DNS blocks and poisoning.
   - Uses `curl_cffi` with Chrome HTTP/2 impersonation when available, and automatically falls back to a built-in Python standard-library TLS 1.3 + SNI transport (`DoHSNIHTTPSConnection` / `StdlibDoHSession`) if `curl_cffi` is absent—ensuring compiled executables never crash with `ModuleNotFoundError`.
   - Operates 100% cookie-free using pure Danbooru API authentication (no `cf_clearance` cookies, no "Verify Human" challenge browser windows, and no profile cache purging required).
-- **Three Configurable Display Modes (Per-Monitor)**:
+- **Four Configurable Display Modes (Per-Monitor)**:
   1. **Scrolling Slideshow (`scroll`)**: Continuous infinite ribbon supporting **4-way scroll directions** (**Scroll Left `←`**, **Scroll Right `→`**, **Scroll Up `↑`**, and **Scroll Down `↓`**), adjustable **Scroll Speed** (`0.1 – 600 px/s`), and **Image Gap** (`0 – 64 px`).
-  2. **Polaroid Collage (`collage`)**: Continuous stacking Polaroid drop animation with hybrid canvas-baking to keep DOM memory low, adjustable **Drop Speed** (`0.2 – 4.0`), **Minimum Size** (`120 – 600 px`), **Maximum Size** (`150 – 900 px`), **Spawn/Drop Delay** (`0 – 600 s`), and a **Fill Screen** burst button (with a 30-second cooldown).
+  2. **Polaroid (`polaroid`)**: Continuous stacking Polaroid drop animation with hybrid canvas-baking to keep DOM memory low, adjustable **Drop Speed** (`0.2 – 4.0`), **Minimum Size** (`120 – 600 px`), **Maximum Size** (`150 – 900 px`), **Spawn/Drop Delay** (`0 – 600 s`), and a **Fill Screen** burst button (with a 30-second cooldown).
   3. **Fullscreen Slideshow (`slideshow`)**: Displays one file at a time filling the entire screen (`100vw × 100vh`). Automatically filters API posts so only files matching the monitor's orientation are displayed (landscape media on landscape screens such as `16:9`; portrait media on portrait screens such as `9:16`), with automatic fast pagination if a batch contains only opposite-orientation posts. Includes adjustable **Fade Transition** (`0 – 10`, where `0` is an instant `0.0s` cut and `10` is a smooth `1.0s` cross-fade) and **Slide Display Time** (`0 – 600 s`).
-- **Dynamic Mode-Specific Display Tab**: In the Application Settings window, the **Display** tab dynamically hides settings for inactive display modes and only shows the controls belonging to the currently selected mode (`scroll`, `collage`, or `slideshow`).
-- **Light Mode & Dark Mode Theme Switcher**: Located on the **Credentials** tab of the Application Settings window. Toggles both the Application Settings window (including the Glossary modal) and the Floating Search Bar between **Light Mode** (clean white/light-gray theme with dark text) and **Dark Mode** (black/charcoal theme with white text), saving your preference automatically.
-- **Floating Desktop Search Bar**: A movable on-screen search widget that lets you query Danbooru tags directly from your desktop.
+  4. **Masonry (`masonry`)**: Fills the entire screen (`100vw × 100vh`) with dynamic images, GIFs, and silent MP4 videos. Includes a **Masonry Layout** toggle button (`masonrylayout`) to switch live between **`Mondrian`** (`mondrian`, Aspect-Locked BSP Mondrian Solver) and **`Rows`** (`rows`, Google Photos-style Justified Horizontal Rows with all blurred background bars removed). Every **Delay** (`1 – 60 s`), the next media item and post-flip layout geometry are **pre-rendered and pre-organized in the background** (`1.2s` before flip initiation, with strict single-slot cleanup and `1280px` static texture downscaling so memory never bloats), then the target tile promotes on-demand to a 3D GPU layer (`.is-flipping`), flips on its Y-axis (`rotateY` 3D card flip), and smoothly reflows **only its horizontal row (in `Rows` mode) or local 3–5 tile subgroup (in `Mondrian` mode)** via GPU FLIP transforms (`translate3d` + `scale3d`). Animated GIFs (parsed via binary GIF89a Graphic Control Extension frame delays) and MP4 videos are guaranteed to play through at least one full loop before becoming eligible to flip. Includes adjustable **Masonry Layout** toggle button (`Mondrian` ⇄ `Rows`), **Tile Count** (`4 – 36`), **Gap** (`0 – 10 px`), and **Delay** (`1 – 60 s`).
+- **Windows Task Manager Performance `📊 Resource Graph` Pop-Out**: Located at the top header of the Application Settings window. Opens a dedicated real-time performance monitor styled and behaving like the Windows Task Manager Performance tab, tracking **CPU (%)**, **Memory (Working Set & Private Commit MB plotted on a true `0% – 100%` scale of Total Physical System RAM)**, and **GPU (%)** across the wallpaper application's entire process tree (Python host + child `msedgewebview2.exe` processes) with scrolling 60-second gridlines, left-sidebar sparkline cards, and a stacked 3-graph view.
+- **Dynamic Mode-Specific Display Tab**: In the Application Settings window, the **Display** tab dynamically hides settings for inactive display modes and only shows the controls belonging to the currently selected mode (`scroll`, `polaroid`, `slideshow`, or `masonry`).
+- **Light Mode & Dark Mode Theme Switcher**: Located on the **Credentials** tab of the Application Settings window. Toggles the Application Settings window, the Resource Graph pop-out, the Glossary modal, and the Floating Search Bar between **Light Mode** (clean white/light-gray theme with dark text) and **Dark Mode** (black/charcoal theme with white text), saving your preference automatically.
+- **Floating Desktop Search Bar with Previous & Next Controls (1.0s High-Stress Cooldown)**:
+  - A movable on-screen search widget that lets you query Danbooru tags directly from your desktop.
+  - **Previous (`◀`) & Next (`▶`) Vertical Rectangle Buttons**: Positioned immediately to the right of the refresh button (`⟳`). Clicking **Previous (`◀`)** requeues the last file shown to the front of the ready queue so it will display next. Clicking **Next (`▶`)** immediately plays/displays the next queued file across the active display mode, protected by a **1.0-second internal cooldown** and single-flip concurrency guard to prevent GPU spikes or freezes under rapid clicking in 36-tile Masonry mode.
 - **Free 2D Movement & Position Lock**: Drag the search bar anywhere across your screen using the move handle (`✥`), or toggle the lock button (`🔓 Unlocked` / `🔒 Locked`) on the Credentials tab to fix it in place.
 - **Live Tag Autocomplete Suggestions**: Queries Danbooru's `/tags.json` endpoint as you type to display the top 5 matching tags along with their post counts.
 - **Search Bookmarks**: Save frequently used tag combinations and recall or delete them via the `▲` drop-down menu.
 - **Dual-Level Pause Controls**:
-  - **Search Bar `PAUSE` Button**: Pauses wallpaper movement and slide transitions (scrolling, collage drops, or slideshow timer) while keeping onscreen animated GIFs and silent MP4 videos playing.
+  - **Search Bar `PAUSE` Button**: Pauses wallpaper movement and transitions (scrolling, Polaroid drops, slideshow timer, or Masonry flips) while keeping onscreen animated GIFs and silent MP4 videos playing.
   - **Logs Tab `PAUSE APPLICATION` Master Button**: Freezes the entire wallpaper onto a static canvas snapshot, pauses all video decoding, and halts all local proxy streams and outbound Danbooru API requests.
 - **Buffered & Shuffled Playback**: Pre-fetches pages of up to 100 posts (`.jpg`, `.jpeg`, `.png`, `.webp`, `.gif`, and `.mp4` files up to `15 MB` with audio strictly muted), shuffles them randomly per page, and deduplicates posts per screen.
 - **Multi-Monitor Support**: Automatically detects all connected monitors via Win32 `EnumDisplayMonitors`, attaches independent wallpaper surfaces behind desktop icons (`Progman` / `WorkerW` across Windows 10, Windows 11 21H2–23H2, and Windows 11 24H2+), and supports per-monitor enable/disable and display mode settings.
-- **Aggregated Real-Time Logs & Built-In Glossary**: The **Logs** tab captures live server, DoH, API, proxy, and UI events and includes a **Glossary** button that opens a reference dialog explaining every log category.
+- **Aggregated Real-Time Logs & Built-In Glossary**: The **Logs** tab captures live server, DoH, API, proxy, navigation, performance, security, and UI events and includes a **Glossary** button that opens a reference dialog explaining every log category.
 - **Zero Hardcoded Credentials & DPAPI Encryption**: No default credentials exist in the codebase. Credentials entered on the **Credentials** tab are stored locally in `%APPDATA%\DanbooruWallpaper\config.json` with your API Key encrypted at rest via Windows Data Protection API (`CryptProtectData` / `CryptUnprotectData`).
 
 ---
@@ -36,15 +46,19 @@ A standalone Windows desktop wallpaper application that streams Danbooru artwork
 
 - **Searching Tags**: Type any standard Danbooru tag combination into the search bar (default search: `scenery no_humans`) and press **Enter** to queue the search for the next buffer cycle, or click the refresh button (`⟳`) / press **Shift + Enter** for an immediate refresh. All streamed files are shuffled per page so repeated searches never play in the same static order. To stream your Danbooru favorites, search `ordfav:YOUR_USERNAME`.
 - **Immediate Refresh**: Press **Shift + Enter** in the search box or click the `⟳` button to immediately clear the media buffer, increment the cache epoch, and fetch fresh posts for your query.
+- **Previous (`◀`) & Next (`▶`) Media Controls**:
+  - Click the vertical rectangle **Previous (`◀`)** button (to the right of `⟳`) to requeue the last file shown back to the front of the queue so that it will be shown next.
+  - Click the vertical rectangle **Next (`▶`)** button to immediately spawn/play the next queued file (spawns the next item in Scroll or Polaroid mode, advances immediately in Fullscreen Slideshow mode, or flips a tile immediately in Masonry mode).
 - **Selecting Tag Suggestions**: Use the **Up** and **Down** arrow keys to highlight a suggested tag from the autocomplete popup, then press **Enter** (or click the item) to insert it.
 - **Saving & Managing Bookmarks**: Click the arrow button (`▲`) on the right side of the search input to open the bookmarks menu. Click **💾 Save Current Search** to bookmark the current query, click any saved query to run it immediately, or click `-` next to a saved query to remove it.
 - **Pausing Wallpaper Motion vs. Pausing the Application**:
-  - Click **PAUSE** on the floating search bar to pause scrolling, collage drops, or slideshow transitions while keeping animated GIFs and MP4s looping.
+  - Click **PAUSE** on the floating search bar to pause scrolling, Polaroid drops, slideshow transitions, or Masonry tile flips while keeping animated GIFs and MP4s looping.
   - Open **Settings → Logs** and click **PAUSE APPLICATION** to completely freeze the display and stop all network/proxy activity.
 - **Minimizing to System Tray**: Click the vertical accent bar on the far-left edge of the search widget, press **Escape** when no dropdowns are open, or right-click the cardboard box system tray icon and select **Show Search Bar**.
-- **Configuring Credentials, Theme, Display Modes & Logs**: Right-click the cardboard box system tray icon and select **Settings**:
+- **Configuring Credentials, Theme, Display Modes, Resource Graph & Logs**: Right-click the cardboard box system tray icon and select **Settings**:
+  - **Top Header `📊 Resource Graph` Button**: Click **📊 Resource Graph** at the top of the Settings window to pop out the Windows Task Manager Performance-style telemetry window showing live 60-second **CPU**, **Memory (RAM)**, and **GPU** utilization graphs for the wallpaper application.
   - **Credentials Tab**: Enter your Danbooru `Username`, `User ID`, and `API Key`, lock/unlock the search bar position, and switch between **Light Mode** and **Dark Mode**.
-  - **Display Tab**: Select a target monitor, enable or disable the wallpaper on that screen, and choose **Display Mode** (`scroll`, `collage`, or `slideshow`). Only the settings for the active mode are shown, and slider/input changes apply live.
+  - **Display Tab**: Select a target monitor, enable or disable the wallpaper on that screen, and choose **Display Mode** (`scroll`, `polaroid`, `slideshow`, or `masonry`). In `masonry` mode, click the **Masonry Layout** button to toggle live between **`Mondrian`** and **`Rows`**. Only the settings for the active mode are shown, and slider/input changes apply live.
   - **Logs Tab**: Pause/resume the entire application, click **Glossary** to view definitions for all log prefixes, or click **Clear Logs**.
 
 ---
@@ -127,7 +141,7 @@ Enter your **Username**, **User ID**, and **API Key** into the **Credentials** t
 Danbooru's API guidelines require `USERNAME` and `API_KEY` for HTTP Basic Authentication / API query authentication—unlocking account-tier tag limits and higher rate limits—while your `USER_ID` and `USERNAME` are used to construct a descriptive, compliant `User-Agent` header:
 `DanbooruWallpaperService/2.0 (by <USERNAME>; user #<USER_ID>)`
 
-Combined with Cloudflare DNS-over-HTTPS (`1.1.1.1`) hostname resolution and local `/media` binary streaming, this pure API architecture avoids ISP DNS blocks and Cloudflare browser challenges without ever writing persistent browser profile caches or cookies to disk.
+Combined with Cloudflare DNS-over-HTTPS (`1.1.1.1`) hostname resolution, binary magic-byte header verification, and local `/media` streaming, this pure API architecture avoids ISP DNS blocks and Cloudflare browser challenges without ever writing persistent browser profile caches or cookies to disk.
 
 More information on Danbooru's official API guidelines can be found at:
 [https://danbooru.donmai.us/wiki_pages/help:api](https://danbooru.donmai.us/wiki_pages/help:api)
@@ -167,7 +181,7 @@ This glossary explains every log prefix and message that can appear in the **Log
 - **When it happens**: Once per monitor during startup.
 
 **`[WEBVIEW] Applied display properties to <screen_id> (enabled=<True/False>).`**
-- **What it means**: Synchronized the selected Display Mode (`scroll`, `collage`, or `slideshow`), sliders, and screen enable state to the target monitor's WebView2 instance.
+- **What it means**: Synchronized the selected Display Mode (`scroll`, `polaroid`, `slideshow`, or `masonry`), sliders, and screen enable state to the target monitor's WebView2 instance.
 - **When it happens**: At startup and whenever you adjust controls on the **Display** tab.
 
 **`[API] Requesting Page <page_number> for tags: '<search_tags>' via <transport_mode>`**
@@ -175,15 +189,15 @@ This glossary explains every log prefix and message that can appear in the **Log
 - **When it happens**: On startup, after a search refresh, or when the in-memory post buffer runs low.
 
 **`[FETCH] Fetched and shuffled <N> media items (Page <P>) for '<search_tags>' (filtered <M> oversized MP4s).`**
-- **What it means**: Python received the posts from Danbooru, filtered out unsupported formats or MP4 videos larger than `15 MB`, rewrote all media URLs to point to `http://127.0.0.1:8088/media`, and shuffled the batch randomly.
+- **What it means**: Python received the posts from Danbooru, filtered out unsupported/unsafe paths or MP4 videos larger than `15 MB`, rewrote all media URLs to point to `http://127.0.0.1:8088/media`, and shuffled the batch randomly.
 - **When it happens**: Immediately after an `[API]` page request completes.
 
 **`[SERVER] Client '<screen_id>' requested batch from /api`**
 - **What it means**: A monitor's WebView2 wallpaper client requested the next batch of shuffled posts from Python's RAM buffer.
-- **When it happens**: Periodically as your wallpaper scrolls, drops Polaroids, or advances slides.
+- **When it happens**: Periodically as your wallpaper scrolls, drops Polaroids, advances slides, or flips Masonry tiles.
 
 **`[PING] Client polled /epoch (<count> times in last <seconds>s)`**
-- **What it means**: Heartbeat summary confirming that active WebView2 wallpaper windows are polling `/epoch` every second for refresh and pause updates (aggregated once every 60 seconds to keep logs clean).
+- **What it means**: Heartbeat summary confirming that active WebView2 wallpaper windows are polling `/epoch` every second for refresh, pause, and navigation updates (aggregated once every 60 seconds to keep logs clean).
 - **When it happens**: Once every 60 seconds while the application is unpaused.
 
 ---
@@ -198,6 +212,10 @@ This glossary explains every log prefix and message that can appear in the **Log
 - **What it means**: You clicked `⟳` or pressed **Shift + Enter**. The in-memory buffer was cleared, the epoch incremented, and a new API fetch started immediately.
 - **When it happens**: When forcing an immediate refresh.
 
+**`[NAV] Previous button clicked: requeued last shown file to the front of the queue.` / `Next button clicked: immediately playing next queued file.`**
+- **What it means**: You clicked the vertical rectangle **Previous (`◀`)** or **Next (`▶`)** button on the right side of the refresh button on the floating search bar.
+- **When it happens**: When clicking `◀` or `▶` on the floating search bar.
+
 **`[SEARCH] Saved query to bookmarks: '<search_tags>'` / `Removed query from bookmarks: '<search_tags>'`**
 - **What it means**: You added or deleted a saved search in the `▲` bookmarks dropdown.
 - **When it happens**: When managing saved searches.
@@ -211,11 +229,11 @@ This glossary explains every log prefix and message that can appear in the **Log
 - **When it happens**: When locking or unlocking the search bar position.
 
 **`[UI] Wallpaper motion paused via search bar (GIFs and MP4 videos remain playing).` / `Wallpaper motion resumed via search bar.`**
-- **What it means**: You clicked the **PAUSE** button on the floating search bar to pause or resume scrolling/collage/slideshow motion.
+- **What it means**: You clicked the **PAUSE** button on the floating search bar to pause or resume scrolling/Polaroid/slideshow/Masonry motion.
 - **When it happens**: When toggling the search bar `PAUSE` button.
 
-**`[COLLAGE] Triggered Fill Screen burst on <screen_id>.`**
-- **What it means**: You clicked the **Fill Screen** button in Collage mode on the Display tab, spawning a rapid burst of Polaroids to cover the monitor and starting the 30-second button cooldown.
+**`[POLAROID] Triggered Fill Screen burst on <screen_id>.`**
+- **What it means**: You clicked the **Fill Screen** button in Polaroid mode on the Display tab, spawning a rapid burst of Polaroids to cover the monitor and starting the 30-second button cooldown.
 - **When it happens**: When clicking **Fill Screen** on the Display tab.
 
 **`[APP] Application PAUSED (display frozen, proxy streams & API calls stopped).` / `Application RESUMED.`**
@@ -250,17 +268,17 @@ This glossary explains every log prefix and message that can appear in the **Log
 - **What it means**: Danbooru returned posts, but all of them were either already seen recently, unsupported file types, or MP4s larger than `15 MB`.
 - **Action needed**: None, or try broader search tags if the query only contains long/large videos.
 
-**`[PROXY] Filtered oversized MP4 (<bytes> bytes > 15 MB): <url>`**
-- **What it means**: The `/media` proxy blocked an MP4 video that exceeded the `15 MB` cap to protect memory and bandwidth.
+**`[PROXY] Filtered oversized MP4 (<bytes> bytes > 15 MB): <url>` / `Filtered oversized image (<bytes> bytes > 25 MB)`**
+- **What it means**: The `/media` proxy blocked an MP4 video that exceeded the `15 MB` cap or an image that exceeded the `25 MB` cap to protect memory and bandwidth.
 - **Action needed**: None.
 
 **`[PROXY] Upstream media HTTP <status_code> for <url>` / `Proxy stream error for <url>: <error>`**
 - **What it means**: An individual CDN media download timed out or dropped mid-stream.
 - **Action needed**: None. The WebView preloader automatically discards the failed item and loads the next one.
 
-**`[SECURITY] Blocked unauthorized media host: <hostname>` / `Blocked unauthorized cross-origin request`**
-- **What it means**: The local proxy rejected a request that did not originate from the local WebView or attempted to fetch a URL outside `danbooru.donmai.us` / `cdn.donmai.us`.
-- **Action needed**: None.
+**`[SECURITY] Blocked unsafe media URL (<reason>): <url>` / `Blocked media stream failing binary signature check (<reason>): <url>`**
+- **What it means**: The security layer blocked a URL containing forbidden tokens (such as `.php`, double extensions, or unauthorized hosts) or aborted a download whose initial binary magic bytes did not match a valid JPEG, PNG, GIF, WEBP, or MP4 header.
+- **Action needed**: None. Potential malware or non-media payload was neutralized before reaching WebView2.
 
 **`[SUGGEST] Suggestion fetch failed: <error details>`**
 - **What it means**: A live tag autocomplete request timed out.

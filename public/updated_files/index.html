@@ -3,7 +3,8 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="referrer" content="no-referrer" />
-  <title>Danbooru Infinite Scroll, Polaroid Collage & Fullscreen Slideshow</title>
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' blob: data:; media-src 'self' blob:; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none';" />
+  <title>Danbooru Infinite Scroll, Polaroid, Fullscreen Slideshow & Masonry</title>
   <style>
     * {
       margin: 0;
@@ -16,8 +17,9 @@
       overflow: hidden;
       background-color: #0b0b0d;
       font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+      user-select: none;
     }
-    #collageBaseCanvas {
+    #polaroidBaseCanvas {
       position: absolute;
       top: 0;
       left: 0;
@@ -35,7 +37,6 @@
       height: 100%;
       pointer-events: none;
       contain: strict;
-      perspective: 1200px;
       z-index: 1;
     }
     #freezeOverlayCanvas {
@@ -63,7 +64,7 @@
       pointer-events: none;
     }
 
-    /* --- Polaroid Collage Item --- */
+    /* --- Polaroid Item --- */
     .polaroid-item {
       position: absolute;
       top: 0;
@@ -103,17 +104,87 @@
       user-select: none;
       pointer-events: none;
     }
+
+    /* --- Masonry Item & On-Demand 3D Y-Axis Flip Card (Uncropped Media, Zero Idle 3D Overhead) --- */
+    .masonry-tile {
+      position: absolute;
+      top: 0;
+      left: 0;
+      transform-origin: 0 0;
+      user-select: none;
+      pointer-events: none;
+      contain: layout style paint;
+    }
+    .masonry-tile.is-flipping {
+      perspective: 1100px;
+      will-change: transform;
+      z-index: 5;
+    }
+    .masonry-tile.is-reflowing {
+      will-change: transform;
+    }
+    .masonry-flip-inner {
+      width: 100%;
+      height: 100%;
+      position: relative;
+      overflow: hidden;
+      background-color: #101014;
+      background-size: cover;
+      background-position: center center;
+      background-repeat: no-repeat;
+      border-radius: 2px;
+      transform-origin: center center;
+    }
+    .masonry-tile.is-flipping .masonry-flip-inner {
+      transform-style: preserve-3d;
+      backface-visibility: hidden;
+      will-change: transform;
+    }
+    .masonry-media {
+      display: block;
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      user-select: none;
+      pointer-events: none;
+      position: relative;
+      z-index: 1;
+    }
+    .masonry-media.pre-staged-media {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      opacity: 0;
+      z-index: 0;
+      pointer-events: none;
+    }
+    /* When Rows (Google Photos) layout is selected, remove all blurred/ambient background sections */
+    #stage.rows-mode .masonry-flip-inner {
+      background-image: none !important;
+      background-color: #0b0b0d;
+    }
+    #stage.rows-mode .masonry-media {
+      object-fit: cover;
+    }
   </style>
 </head>
 <body>
-  <canvas id="collageBaseCanvas"></canvas>
+  <canvas id="polaroidBaseCanvas"></canvas>
   <div id="stage"></div>
   <canvas id="freezeOverlayCanvas"></canvas>
 
   <script>
+    // Prevent any accidental drag, context menu, or navigation/download triggers inside WebView2
+    window.addEventListener('dragstart', e => e.preventDefault());
+    window.addEventListener('drop', e => e.preventDefault());
+    window.addEventListener('dragover', e => e.preventDefault());
+    window.addEventListener('contextmenu', e => e.preventDefault());
+
     const stage = document.getElementById('stage');
-    const collageBaseCanvas = document.getElementById('collageBaseCanvas');
-    const collageCtx = collageBaseCanvas.getContext('2d');
+    const polaroidBaseCanvas = document.getElementById('polaroidBaseCanvas');
+    const polaroidCtx = polaroidBaseCanvas.getContext('2d');
     const freezeOverlayCanvas = document.getElementById('freezeOverlayCanvas');
     const freezeCtx = freezeOverlayCanvas.getContext('2d');
 
@@ -129,28 +200,37 @@
     let APP_PAUSED = false;           // Master application pause (freezes everything)
     let WALLPAPER_PAUSED = false;     // Search bar pause (pauses motion/transitions, keeps GIF/MP4 playing)
 
-    let DISPLAY_MODE = 'scroll';      // 'scroll' | 'collage' | 'slideshow'
+    let DISPLAY_MODE = 'scroll';      // 'scroll' | 'polaroid' | 'slideshow' | 'masonry'
     let SCROLL_DIRECTION = 'left';    // 'left' | 'right' | 'up' | 'down'
     let SCROLL_SPEED = 120;           // Pixels per second (0.1 to 600 px/s)
     let GAP = 12;                     // Space between scrolling images in pixels
 
-    let COLLAGE_DROP_SPEED = 1.0;     // Speed multiplier (0.2x to 4.0x)
-    let COLLAGE_MIN_SIZE = 220;       // Minimum polaroid target dimension (px)
-    let COLLAGE_MAX_SIZE = 440;       // Maximum polaroid target dimension (px)
-    let COLLAGE_DROP_DELAY = 0;       // Extra delay between collage drops (0 to 600s)
+    let POLAROID_DROP_SPEED = 1.0;    // Speed multiplier (0.2x to 4.0x)
+    let POLAROID_MIN_SIZE = 220;      // Minimum polaroid target dimension (px)
+    let POLAROID_MAX_SIZE = 440;      // Maximum polaroid target dimension (px)
+    let POLAROID_DROP_DELAY = 0;      // Extra delay between polaroid drops (0 to 600s)
 
     let SLIDESHOW_FADE = 5.0;         // 0 to 10 (0 = 0s instant, 10 = 1.0s fade transition)
     let SLIDESHOW_DURATION = 10;      // 0 to 600 seconds per slide
 
-    // --- Shared Queue & Parallel Preloader State ---
-    const BASE_PRELOAD_BUFFER_TARGET = 12;
+    let MASONRY_LAYOUT = 'mondrian';  // 'mondrian' (Mondrian) | 'rows' (Rows / Google Photos)
+    let MASONRY_TILES = 12;           // 4 to 36 tiles on screen
+    let MASONRY_GAP = 4;              // 0 to 10 px gap between masonry tiles
+    let MASONRY_DELAY = 5;            // 1 to 60 seconds before flipping one tile
+
+    // --- Shared Queue, History & Parallel Preloader State ---
+    const BASE_PRELOAD_BUFFER_TARGET = 16;
     let preloadBufferTarget = BASE_PRELOAD_BUFFER_TARGET;
     const MAX_CONCURRENT_LOADS = 4;
     const MIN_API_COOLDOWN_MS = 3000;
-    const LOW_QUEUE_THRESHOLD = 10;
+    const LOW_QUEUE_THRESHOLD = 12;
 
     let postQueue = [];
-    let readyImageQueue = [];         // Preloaded { media, isVideo, isAnimated, aspect, naturalW, naturalH }
+    let readyImageQueue = [];         // Preloaded { media, url, isVideo, isAnimated, isGif, gifLoopDurationSec, aspect, naturalW, naturalH, ambientBgUrl }
+    let shownHistoryStack = [];       // Recently displayed descriptors for 'Previous' button requeueing
+    const MAX_SHOWN_HISTORY = 60;
+    let currentDisplayedDesc = null;  // Tracks the latest displayed descriptor so 'Previous' can requeue the one before or last shown
+
     let inFlightMedia = new Set();    // Active Image() or <video> elements currently downloading
     let activePreloadCount = 0;
     let preloadGeneration = 1;
@@ -160,21 +240,25 @@
     let nextAllowedFetchTime = 0;
     let consecutiveEmptyFetches = 0;
     let currentEpoch = null;
+    let lastNavSeq = null;
+    let lastPropSeq = null;
+    let lastManualNavTimeMs = 0;
+    const MANUAL_NAV_COOLDOWN_MS = 1000; // 1.0s internal Next/Previous button cooldown under high stress
     let lastTime = null;
 
     // --- Scroll Mode State ---
     let activeItems = [];
 
-    // --- Collage Mode State & Hybrid Canvas-Baking Tuning ---
+    // --- Polaroid Mode State & Hybrid Canvas-Baking Tuning ---
     const POLAROID_PAD_SIDE = 12;
     const POLAROID_PAD_TOP = 12;
     const POLAROID_PAD_BOTTOM = 34;
 
-    const MAX_LIVE_COLLAGE_DOM = 30;
+    const MAX_LIVE_POLAROID_DOM = 30;
     const OCCLUDED_GRACE_DROPS = 4;
     const COVERAGE_INSET_PX = 8;
 
-    let collageItems = [];
+    let polaroidItems = [];
     let fallingItems = [];
     let timeSinceLastDrop = 999;
     let nextZIndex = 1;
@@ -189,12 +273,46 @@
     let screenFullyCovered = false;
 
     // --- Slideshow Mode State ---
-    let currentSlideItem = null;      // { element, mediaElement, isVideo, isAnimated, aspect }
+    let currentSlideItem = null;      // { element, mediaElement, isVideo, isAnimated, aspect, desc }
     let previousSlideItem = null;     // Outgoing slide during fade transition
     let slideshowTimer = 0;
     let slideshowFadeElapsed = 0;
     let slideshowIsFading = false;
     let activeFadeDurationSec = 0.5;
+
+    // --- Masonry Mode State (Mondrian BSP + Rows Layout + Pre-Staged Switch & GPU FLIP) ---
+    let masonryTreeRoot = null;       // Top-level BSP tree partitioning screen across local groups
+    let masonryGroups = [];           // Array of local group objects (or horizontal row objects in 'rows' mode)
+    let masonryTileList = [];         // Active tile objects on screen
+    let masonrySwitchTimer = 0;
+    let nextMasonryTileId = 1;
+    let preStagedMasonryPlan = null;  // Single-slot background pre-rendered & pre-organized next media switch
+    const MASONRY_PRE_STAGE_LEAD_SEC = 1.2;   // Pre-render & pre-organize 1.2s before flip starts
+    const MASONRY_FLIP_HALF_SEC = 0.24;       // 0.24s out (0 -> 90deg) + 0.24s in (-90 -> 0deg)
+    const MASONRY_REFLOW_DURATION_SEC = 0.34; // GPU FLIP translate3d/scale3d interpolation duration
+    const ambientSampleCanvas = document.createElement('canvas');
+    ambientSampleCanvas.width = 24;
+    ambientSampleCanvas.height = 24;
+    const ambientSampleCtx = ambientSampleCanvas.getContext('2d');
+    const downscaleScratchCanvas = document.createElement('canvas');
+    const downscaleScratchCtx = downscaleScratchCanvas.getContext('2d');
+    let isDownscaleCanvasBusy = false;
+
+    function normalizeModeName(rawMode) {
+      const m = String(rawMode || '').toLowerCase().trim();
+      if (m === 'polaroid') return 'polaroid';
+      if (m === 'slideshow') return 'slideshow';
+      if (m === 'masonry') return 'masonry';
+      return 'scroll';
+    }
+
+    function normalizeMasonryLayout(rawLayout) {
+      const l = String(rawLayout || '').toLowerCase().trim();
+      if (l === 'rows' || l === 'row' || l === 'google_photos' || l === 'googlephotos' || l === 'google' || l === 'google photos') {
+        return 'rows';
+      }
+      return 'mondrian';
+    }
 
     function isHorizontalScroll() {
       return SCROLL_DIRECTION === 'left' || SCROLL_DIRECTION === 'right';
@@ -236,6 +354,28 @@
       return '';
     }
 
+    // Record a shown item into history so the Search Bar "Previous" button can requeue it
+    function recordShownMedia(readyItem) {
+      if (!readyItem || !readyItem.url) return;
+      const snapshot = {
+        url: readyItem.url,
+        isVideo: Boolean(readyItem.isVideo),
+        isAnimated: Boolean(readyItem.isAnimated),
+        isGif: Boolean(readyItem.isGif),
+        gifLoopDurationSec: Number(readyItem.gifLoopDurationSec) || 2.5,
+        aspect: Number(readyItem.aspect) || 1.0,
+        naturalW: Number(readyItem.naturalW) || 1,
+        naturalH: Number(readyItem.naturalH) || 1
+      };
+      if (currentDisplayedDesc) {
+        shownHistoryStack.push(currentDisplayedDesc);
+        if (shownHistoryStack.length > MAX_SHOWN_HISTORY) {
+          shownHistoryStack.shift();
+        }
+      }
+      currentDisplayedDesc = snapshot;
+    }
+
     function enforceSilentVideo(video) {
       if (!video) return;
       video.muted = true;
@@ -253,37 +393,100 @@
       });
     }
 
-    function resizeCollageCanvas(preserveContent = true) {
+    // Attach playthrough tracking to an MP4 or GIF item so Masonry waits for 1 full playthrough before flipping
+    function attachPlaythroughTracker(tileObj) {
+      if (!tileObj) return;
+      tileObj.liveElapsedSec = 0;
+
+      if (!tileObj.isAnimated) {
+        tileObj.hasPlayedOnce = true;
+        return;
+      }
+
+      tileObj.hasPlayedOnce = false;
+
+      if (tileObj.isVideo && tileObj.mediaElement) {
+        const vid = tileObj.mediaElement;
+        let lastT = 0;
+        const markPlayed = () => {
+          tileObj.hasPlayedOnce = true;
+        };
+        vid.addEventListener('ended', markPlayed, { once: true });
+        vid.onloadedmetadata = () => {
+          if (Number.isFinite(vid.duration) && vid.duration > 0) {
+            tileObj.minPlayDurationSec = Math.min(60, vid.duration);
+          }
+        };
+        if (Number.isFinite(vid.duration) && vid.duration > 0) {
+          tileObj.minPlayDurationSec = Math.min(60, vid.duration);
+        } else {
+          tileObj.minPlayDurationSec = 3.0;
+        }
+        vid.ontimeupdate = () => {
+          const cur = vid.currentTime || 0;
+          const dur = vid.duration || 0;
+          if (cur < lastT - 0.25 || (dur > 0 && cur >= dur - 0.15)) {
+            tileObj.hasPlayedOnce = true;
+          }
+          lastT = cur;
+        };
+      } else {
+        // Animated GIF: use exact parsed binary loop duration
+        tileObj.minPlayDurationSec = Math.max(1.2, Number(tileObj.gifLoopDurationSec) || 2.5);
+      }
+    }
+
+    // Parses GIF89a Graphic Control Extension (0x21 0xF9) frame delays to compute 1 full loop duration in seconds
+    function parseGifLoopDurationSec(uint8) {
+      if (!uint8 || uint8.length < 14) return 2.5;
+      // Verify GIF87a / GIF89a header
+      if (uint8[0] !== 0x47 || uint8[1] !== 0x49 || uint8[2] !== 0x46) {
+        return 2.5;
+      }
+      let totalCs = 0;
+      let frameCount = 0;
+      for (let i = 0; i < uint8.length - 7; i++) {
+        if (uint8[i] === 0x21 && uint8[i + 1] === 0xF9 && uint8[i + 2] === 0x04 && uint8[i + 7] === 0x00) {
+          const delayCs = uint8[i + 4] | (uint8[i + 5] << 8);
+          totalCs += (delayCs < 2 ? 10 : delayCs);
+          frameCount++;
+        }
+      }
+      if (frameCount <= 1) return 1.0;
+      return Math.max(1.0, Math.min(45.0, totalCs / 100.0));
+    }
+
+    function resizePolaroidCanvas(preserveContent = true) {
       const dpr = window.devicePixelRatio || 1;
       const targetW = Math.max(1, Math.round(window.innerWidth * dpr));
       const targetH = Math.max(1, Math.round(window.innerHeight * dpr));
 
-      if (collageBaseCanvas.width === targetW && collageBaseCanvas.height === targetH) {
+      if (polaroidBaseCanvas.width === targetW && polaroidBaseCanvas.height === targetH) {
         return;
       }
 
       let tempCanvas = null;
-      if (preserveContent && collageBaseCanvas.width > 0 && collageBaseCanvas.height > 0) {
+      if (preserveContent && polaroidBaseCanvas.width > 0 && polaroidBaseCanvas.height > 0) {
         tempCanvas = document.createElement('canvas');
-        tempCanvas.width = collageBaseCanvas.width;
-        tempCanvas.height = collageBaseCanvas.height;
-        tempCanvas.getContext('2d').drawImage(collageBaseCanvas, 0, 0);
+        tempCanvas.width = polaroidBaseCanvas.width;
+        tempCanvas.height = polaroidBaseCanvas.height;
+        tempCanvas.getContext('2d').drawImage(polaroidBaseCanvas, 0, 0);
       }
 
-      collageBaseCanvas.width = targetW;
-      collageBaseCanvas.height = targetH;
+      polaroidBaseCanvas.width = targetW;
+      polaroidBaseCanvas.height = targetH;
 
       if (tempCanvas) {
-        collageCtx.drawImage(tempCanvas, 0, 0, targetW, targetH);
+        polaroidCtx.drawImage(tempCanvas, 0, 0, targetW, targetH);
       }
     }
 
-    function clearCollageCanvas() {
-      collageCtx.clearRect(0, 0, collageBaseCanvas.width, collageBaseCanvas.height);
+    function clearPolaroidCanvas() {
+      polaroidCtx.clearRect(0, 0, polaroidBaseCanvas.width, polaroidBaseCanvas.height);
     }
 
     function bakePolaroidToCanvas(item) {
-      if (!collageCtx || !item || !item.mediaElement) return;
+      if (!polaroidCtx || !item || !item.mediaElement) return;
       const dpr = window.devicePixelRatio || 1;
       const cx = item.targetX + item.totalW / 2;
       const cy = item.targetY + item.totalH / 2;
@@ -293,32 +496,32 @@
       const imgW = item.totalW - POLAROID_PAD_SIDE * 2;
       const imgH = item.totalH - POLAROID_PAD_TOP - POLAROID_PAD_BOTTOM;
 
-      collageCtx.save();
-      collageCtx.scale(dpr, dpr);
-      collageCtx.translate(cx, cy);
-      collageCtx.rotate(rad);
+      polaroidCtx.save();
+      polaroidCtx.scale(dpr, dpr);
+      polaroidCtx.translate(cx, cy);
+      polaroidCtx.rotate(rad);
 
-      collageCtx.shadowColor = 'rgba(0, 0, 0, 0.55)';
-      collageCtx.shadowBlur = 24;
-      collageCtx.shadowOffsetX = 0;
-      collageCtx.shadowOffsetY = 8;
-      collageCtx.fillStyle = '#ffffff';
-      collageCtx.beginPath();
-      if (collageCtx.roundRect) {
-        collageCtx.roundRect(-halfW, -halfH, item.totalW, item.totalH, 3);
+      polaroidCtx.shadowColor = 'rgba(0, 0, 0, 0.55)';
+      polaroidCtx.shadowBlur = 24;
+      polaroidCtx.shadowOffsetX = 0;
+      polaroidCtx.shadowOffsetY = 8;
+      polaroidCtx.fillStyle = '#ffffff';
+      polaroidCtx.beginPath();
+      if (polaroidCtx.roundRect) {
+        polaroidCtx.roundRect(-halfW, -halfH, item.totalW, item.totalH, 3);
       } else {
-        collageCtx.rect(-halfW, -halfH, item.totalW, item.totalH);
+        polaroidCtx.rect(-halfW, -halfH, item.totalW, item.totalH);
       }
-      collageCtx.fill();
+      polaroidCtx.fill();
 
-      collageCtx.shadowColor = 'transparent';
-      collageCtx.shadowBlur = 0;
-      collageCtx.shadowOffsetY = 0;
-      collageCtx.fillStyle = '#111111';
-      collageCtx.fillRect(-halfW + POLAROID_PAD_SIDE, -halfH + POLAROID_PAD_TOP, imgW, imgH);
+      polaroidCtx.shadowColor = 'transparent';
+      polaroidCtx.shadowBlur = 0;
+      polaroidCtx.shadowOffsetY = 0;
+      polaroidCtx.fillStyle = '#111111';
+      polaroidCtx.fillRect(-halfW + POLAROID_PAD_SIDE, -halfH + POLAROID_PAD_TOP, imgW, imgH);
 
       try {
-        collageCtx.drawImage(
+        polaroidCtx.drawImage(
           item.mediaElement,
           -halfW + POLAROID_PAD_SIDE,
           -halfH + POLAROID_PAD_TOP,
@@ -327,7 +530,7 @@
         );
       } catch (e) {}
 
-      collageCtx.restore();
+      polaroidCtx.restore();
     }
 
     function drawCoverMedia(ctx, media, x, y, w, h, aspect) {
@@ -403,11 +606,22 @@
           );
           freezeCtx.restore();
         }
+      } else if (DISPLAY_MODE === 'masonry') {
+        for (let i = 0; i < masonryTileList.length; i++) {
+          const tile = masonryTileList[i];
+          if (!tile.mediaElement) continue;
+          freezeCtx.save();
+          freezeCtx.beginPath();
+          freezeCtx.rect(tile.x, tile.y, tile.w, tile.h);
+          freezeCtx.clip();
+          drawCoverMedia(freezeCtx, tile.mediaElement, tile.x, tile.y, tile.w, tile.h, tile.aspect);
+          freezeCtx.restore();
+        }
       } else {
         try {
-          freezeCtx.drawImage(collageBaseCanvas, 0, 0, window.innerWidth, window.innerHeight);
+          freezeCtx.drawImage(polaroidBaseCanvas, 0, 0, window.innerWidth, window.innerHeight);
         } catch (e) {}
-        const allItems = collageItems.concat(fallingItems);
+        const allItems = polaroidItems.concat(fallingItems);
         for (let i = 0; i < allItems.length; i++) {
           const item = allItems[i];
           if (!item.mediaElement) continue;
@@ -481,29 +695,32 @@
         clearReadyQueue();
         clearStageAll();
         stage.style.display = 'none';
-        collageBaseCanvas.style.display = 'none';
+        polaroidBaseCanvas.style.display = 'none';
       } else {
         stage.style.display = 'block';
-        if (DISPLAY_MODE === 'collage') {
-          resizeCollageCanvas(false);
-          collageBaseCanvas.style.display = 'block';
+        if (DISPLAY_MODE === 'polaroid') {
+          resizePolaroidCanvas(false);
+          polaroidBaseCanvas.style.display = 'block';
         }
         consecutiveLoadErrors = 0;
         preloaderBackoffUntil = 0;
         nextAllowedFetchTime = 0;
         timeSinceLastDrop = 999;
         slideshowTimer = 999999;
+        masonrySwitchTimer = 0;
         pumpPreloader();
         if (DISPLAY_MODE === 'scroll') {
           fillScrollBuffer();
         } else if (DISPLAY_MODE === 'slideshow') {
           advanceSlideshowIfReady();
+        } else if (DISPLAY_MODE === 'masonry') {
+          populateMasonryIfNeeded();
         }
       }
     };
 
-    window.triggerFillCollageScreen = function() {
-      if (DISPLAY_MODE !== 'collage' || APP_PAUSED || !SCREEN_ENABLED) return;
+    window.triggerFillPolaroidScreen = function() {
+      if (DISPLAY_MODE !== 'polaroid' || APP_PAUSED || !SCREEN_ENABLED) return;
       screenFullyCovered = false;
       fillScreenBurstRemaining = 28;
       preloadBufferTarget = 32;
@@ -512,9 +729,9 @@
     };
 
     function drainFillScreenBurst() {
-      if (DISPLAY_MODE !== 'collage' || fillScreenBurstRemaining <= 0 || APP_PAUSED) return;
+      if (DISPLAY_MODE !== 'polaroid' || fillScreenBurstRemaining <= 0 || APP_PAUSED) return;
       while (fillScreenBurstRemaining > 0 && readyImageQueue.length > 0 && !screenFullyCovered) {
-        if (spawnNextCollageItem()) {
+        if (spawnNextPolaroidItem()) {
           fillScreenBurstRemaining--;
         } else {
           break;
@@ -528,6 +745,121 @@
         pumpPreloader();
       }
     }
+
+    // =========================================================================
+    // SEARCH BAR NAVIGATION CALLBACKS: PREVIOUS (REQUEUE LAST) & NEXT (PLAY NOW)
+    // =========================================================================
+    function createMediaElementFromDescriptor(desc, onComplete) {
+      if (!desc || !desc.url) return;
+      if (desc.isVideo) {
+        const video = document.createElement('video');
+        enforceSilentVideo(video);
+        video.preload = 'auto';
+        let done = false;
+        const finish = () => {
+          if (done) return;
+          done = true;
+          video.onloadeddata = null;
+          video.oncanplay = null;
+          video.onerror = null;
+          onComplete({
+            media: video,
+            url: desc.url,
+            isVideo: true,
+            isAnimated: true,
+            isGif: false,
+            gifLoopDurationSec: 3.0,
+            aspect: desc.aspect || 1.0,
+            naturalW: desc.naturalW || 16,
+            naturalH: desc.naturalH || 9,
+            ambientBgUrl: computeAmbientBackdropDataUrl(video)
+          });
+        };
+        video.onloadeddata = finish;
+        video.oncanplay = finish;
+        video.onerror = () => { done = true; };
+        video.src = desc.url;
+        video.load();
+      } else {
+        const img = new Image();
+        img.decoding = 'async';
+        img.referrerPolicy = 'no-referrer';
+        img.onload = () => {
+          onComplete({
+            media: img,
+            url: desc.url,
+            isVideo: false,
+            isAnimated: Boolean(desc.isAnimated),
+            isGif: Boolean(desc.isGif),
+            gifLoopDurationSec: Number(desc.gifLoopDurationSec) || 2.5,
+            aspect: desc.aspect || ((img.naturalWidth || 1) / (img.naturalHeight || 1)),
+            naturalW: img.naturalWidth || desc.naturalW || 1,
+            naturalH: img.naturalHeight || desc.naturalH || 1,
+            ambientBgUrl: computeAmbientBackdropDataUrl(img)
+          });
+        };
+        img.src = desc.url;
+      }
+    }
+
+    // "Previous" button: Requeues the last file shown to the front of readyImageQueue so it will show next
+    window.triggerPreviousMedia = function(seq) {
+      if (typeof seq === 'number') {
+        if (lastNavSeq !== null && seq <= lastNavSeq) return;
+        lastNavSeq = seq;
+      }
+      const nowMs = performance.now();
+      if (nowMs - lastManualNavTimeMs < MANUAL_NAV_COOLDOWN_MS) return;
+      lastManualNavTimeMs = nowMs;
+
+      if (APP_PAUSED || !SCREEN_ENABLED) return;
+      const targetDesc = shownHistoryStack.length > 0
+        ? shownHistoryStack.pop()
+        : currentDisplayedDesc;
+
+      if (!targetDesc || !targetDesc.url) return;
+
+      createMediaElementFromDescriptor(targetDesc, (requeuedItem) => {
+        readyImageQueue.unshift(requeuedItem);
+      });
+    };
+
+    // "Next" button: Immediately plays/transitions the next queued file in the active display mode (strictly once per click, 1.0s cooldown)
+    window.triggerNextMedia = function(seq) {
+      if (typeof seq === 'number') {
+        if (lastNavSeq !== null && seq <= lastNavSeq) return;
+        lastNavSeq = seq;
+      }
+      const nowMs = performance.now();
+      if (nowMs - lastManualNavTimeMs < MANUAL_NAV_COOLDOWN_MS) return;
+
+      if (APP_PAUSED || !SCREEN_ENABLED) return;
+      if (DISPLAY_MODE === 'masonry' && isAnyMasonryTileBusy()) {
+        return;
+      }
+      lastManualNavTimeMs = nowMs;
+
+      if (readyImageQueue.length === 0) {
+        pumpPreloader();
+        return;
+      }
+
+      if (DISPLAY_MODE === 'slideshow') {
+        slideshowIsFading = false;
+        slideshowTimer = 0;
+        advanceSlideshowIfReady(true);
+      } else if (DISPLAY_MODE === 'polaroid') {
+        if (spawnNextPolaroidItem()) {
+          timeSinceLastDrop = 0;
+        }
+      } else if (DISPLAY_MODE === 'masonry') {
+        if (triggerNextMasonryFlip(true)) {
+          masonrySwitchTimer = 0;
+        }
+      } else if (DISPLAY_MODE === 'scroll') {
+        spawnImmediateScrollNextItem();
+      }
+    };
 
     // =========================================================================
     // NETWORK FETCH & STRICT LOCAL PYTHON PROXY PRELOADER (/media)
@@ -552,7 +884,6 @@
               const filtered = newPosts.filter(postMatchesScreenOrientation);
               postQueue.push(...filtered);
               if (filtered.length === 0) {
-                // Entire batch was opposite orientation; schedule next batch quickly so slideshow doesn't stall
                 nextAllowedFetchTime = performance.now() + 400;
                 setTimeout(() => fetchNextPage(), 420);
               }
@@ -579,7 +910,7 @@
       }
     }
 
-    function finalizePreloadedMedia(mediaEl, gen, isVideo, isAnimated) {
+    function finalizePreloadedMedia(mediaEl, localMediaUrl, gen, isVideo, isAnimated, isGif, gifLoopDurationSec) {
       if (!inFlightMedia.has(mediaEl)) return;
       inFlightMedia.delete(mediaEl);
       activePreloadCount = Math.max(0, activePreloadCount - 1);
@@ -602,13 +933,21 @@
         return;
       }
 
+      // Pre-compute the 24x24 ambient color backdrop during preload idle time
+      // so the 90-degree flip midpoint never executes synchronous canvas.toDataURL()
+      const precomputedAmbientUrl = computeAmbientBackdropDataUrl(mediaEl);
+
       readyImageQueue.push({
         media: mediaEl,
+        url: localMediaUrl,
         isVideo: isVideo,
         isAnimated: isAnimated,
+        isGif: Boolean(isGif),
+        gifLoopDurationSec: Number(gifLoopDurationSec) || 2.5,
         aspect: aspect,
         naturalW: naturalW,
-        naturalH: naturalH
+        naturalH: naturalH,
+        ambientBgUrl: precomputedAmbientUrl
       });
 
       if (DISPLAY_MODE === 'scroll') {
@@ -617,6 +956,8 @@
         if (!currentSlideItem) {
           advanceSlideshowIfReady();
         }
+      } else if (DISPLAY_MODE === 'masonry') {
+        populateMasonryIfNeeded();
       } else if (fillScreenBurstRemaining > 0) {
         drainFillScreenBurst();
       }
@@ -644,13 +985,21 @@
       const now = performance.now();
       if (now < preloaderBackoffUntil) return;
 
+      // Once all Masonry tiles are populated on screen, keep a lean 10-item ready buffer
+      // instead of holding 42 extra decoded media elements in memory alongside 36 live tiles
+      const dynamicTarget = DISPLAY_MODE === 'masonry'
+        ? (masonryTileList.length < MASONRY_TILES
+            ? Math.max(BASE_PRELOAD_BUFFER_TARGET, MASONRY_TILES - masonryTileList.length + 6)
+            : 10)
+        : preloadBufferTarget;
+
       if (postQueue.length < LOW_QUEUE_THRESHOLD && !isFetching && now >= nextAllowedFetchTime) {
         fetchNextPage();
       }
 
       while (
         activePreloadCount < MAX_CONCURRENT_LOADS &&
-        (readyImageQueue.length + activePreloadCount) < preloadBufferTarget &&
+        (readyImageQueue.length + activePreloadCount) < dynamicTarget &&
         postQueue.length > 0
       ) {
         const post = postQueue.shift();
@@ -665,7 +1014,8 @@
 
         const ext = String(post.file_ext || '').toLowerCase();
         const isVideo = (ext === 'mp4') || localMediaUrl.toLowerCase().includes('ext=mp4');
-        const isAnimated = isVideo || (ext === 'gif') || localMediaUrl.toLowerCase().includes('ext=gif');
+        const isGif = !isVideo && ((ext === 'gif') || localMediaUrl.toLowerCase().includes('ext=gif'));
+        const isAnimated = isVideo || isGif;
 
         activePreloadCount++;
         const gen = preloadGeneration;
@@ -684,7 +1034,8 @@
             video.onloadeddata = null;
             video.oncanplay = null;
             video.onerror = null;
-            finalizePreloadedMedia(video, gen, true, true);
+            const durSec = (Number.isFinite(video.duration) && video.duration > 0) ? video.duration : 3.0;
+            finalizePreloadedMedia(video, localMediaUrl, gen, true, true, false, durSec);
           };
 
           video.onloadeddata = onReady;
@@ -696,9 +1047,38 @@
             handleMediaLoadFailure(video);
           };
 
-          // Strictly route all video traffic through local Python proxy (/media)
           video.src = localMediaUrl;
           video.load();
+        } else if (isGif) {
+          const img = new Image();
+          img.decoding = 'async';
+          img.referrerPolicy = 'no-referrer';
+          inFlightMedia.add(img);
+
+          // Single-pass GIF fetch: parse exact GIF89a frame-delay loop duration and load directly from local Blob URL
+          fetch(localMediaUrl)
+            .then(r => {
+              if (!r.ok) throw new Error('GIF fetch failed');
+              return r.arrayBuffer();
+            })
+            .then(buf => {
+              const uint8 = new Uint8Array(buf);
+              const loopSec = parseGifLoopDurationSec(uint8);
+              const blobUrl = URL.createObjectURL(new Blob([buf], { type: 'image/gif' }));
+              img.dataset.blobUrl = blobUrl;
+              img.onload = () => {
+                finalizePreloadedMedia(img, localMediaUrl, gen, false, true, true, loopSec);
+              };
+              img.onerror = () => handleMediaLoadFailure(img);
+              img.src = blobUrl;
+            })
+            .catch(() => {
+              img.onload = () => {
+                finalizePreloadedMedia(img, localMediaUrl, gen, false, true, true, 2.5);
+              };
+              img.onerror = () => handleMediaLoadFailure(img);
+              img.src = localMediaUrl;
+            });
         } else {
           const img = new Image();
           img.decoding = 'async';
@@ -706,12 +1086,66 @@
           inFlightMedia.add(img);
 
           img.onload = () => {
-            if (typeof img.decode === 'function' && !isAnimated) {
+            // Downscale oversized 4K/8K static images in Masonry/Polaroid modes to bounded display resolution
+            // to prevent GPU texture upload stalls during flips and eliminate VRAM bloat
+            const maxAllowedDim = DISPLAY_MODE === 'masonry' ? 1280 : 1920;
+            const nw = img.naturalWidth || 1;
+            const nh = img.naturalHeight || 1;
+            const canUseDownscaleCanvas =
+              downscaleScratchCtx &&
+              !isDownscaleCanvasBusy &&
+              !(DISPLAY_MODE === 'masonry' && isAnyMasonryTileBusy());
+            if ((nw > maxAllowedDim || nh > maxAllowedDim) && canUseDownscaleCanvas) {
+              try {
+                isDownscaleCanvasBusy = true;
+                const scale = maxAllowedDim / Math.max(nw, nh);
+                const tw = Math.max(16, Math.round(nw * scale));
+                const th = Math.max(16, Math.round(nh * scale));
+                downscaleScratchCanvas.width = tw;
+                downscaleScratchCanvas.height = th;
+                downscaleScratchCtx.drawImage(img, 0, 0, tw, th);
+                downscaleScratchCanvas.toBlob((blob) => {
+                  // Immediately release scratch canvas backing store so it never holds RAM
+                  downscaleScratchCanvas.width = 1;
+                  downscaleScratchCanvas.height = 1;
+                  isDownscaleCanvasBusy = false;
+                  if (!blob || !inFlightMedia.has(img)) {
+                    finalizePreloadedMedia(img, localMediaUrl, gen, false, false, false, 0);
+                    return;
+                  }
+                  const blobUrl = URL.createObjectURL(blob);
+                  const scaledImg = new Image();
+                  scaledImg.decoding = 'async';
+                  scaledImg.dataset.blobUrl = blobUrl;
+                  inFlightMedia.delete(img);
+                  cleanupMediaNode(img);
+                  inFlightMedia.add(scaledImg);
+                  scaledImg.onload = () => {
+                    if (typeof scaledImg.decode === 'function') {
+                      scaledImg.decode()
+                        .then(() => finalizePreloadedMedia(scaledImg, localMediaUrl, gen, false, false, false, 0))
+                        .catch(() => finalizePreloadedMedia(scaledImg, localMediaUrl, gen, false, false, false, 0));
+                    } else {
+                      finalizePreloadedMedia(scaledImg, localMediaUrl, gen, false, false, false, 0);
+                    }
+                  };
+                  scaledImg.onerror = () => handleMediaLoadFailure(scaledImg);
+                  scaledImg.src = blobUrl;
+                }, 'image/jpeg', 0.90);
+                return;
+              } catch (e) {
+                downscaleScratchCanvas.width = 1;
+                downscaleScratchCanvas.height = 1;
+                isDownscaleCanvasBusy = false;
+              }
+            }
+
+            if (typeof img.decode === 'function') {
               img.decode()
-                .then(() => finalizePreloadedMedia(img, gen, false, isAnimated))
-                .catch(() => finalizePreloadedMedia(img, gen, false, isAnimated));
+                .then(() => finalizePreloadedMedia(img, localMediaUrl, gen, false, false, false, 0))
+                .catch(() => finalizePreloadedMedia(img, localMediaUrl, gen, false, false, false, 0));
             } else {
-              finalizePreloadedMedia(img, gen, false, isAnimated);
+              finalizePreloadedMedia(img, localMediaUrl, gen, false, false, false, 0);
             }
           };
 
@@ -719,7 +1153,6 @@
             handleMediaLoadFailure(img);
           };
 
-          // Strictly route all image traffic through local Python proxy (/media)
           img.src = localMediaUrl;
         }
       }
@@ -732,10 +1165,16 @@
     function cleanupMediaNode(node) {
       if (!node) return;
       try {
+        if (node.dataset && node.dataset.blobUrl) {
+          URL.revokeObjectURL(node.dataset.blobUrl);
+          delete node.dataset.blobUrl;
+        }
         if (node.tagName === 'VIDEO') {
           node.onloadeddata = null;
           node.oncanplay = null;
           node.onerror = null;
+          node.ontimeupdate = null;
+          node.onloadedmetadata = null;
           node.pause();
           node.removeAttribute('src');
           node.load();
@@ -798,22 +1237,37 @@
     }
 
     function clearStageAll() {
+      clearPreStagedMasonrySwitch(false);
       for (let i = 0; i < activeItems.length; i++) destroyItem(activeItems[i]);
-      for (let i = 0; i < collageItems.length; i++) destroyItem(collageItems[i]);
+      for (let i = 0; i < polaroidItems.length; i++) destroyItem(polaroidItems[i]);
       for (let i = 0; i < fallingItems.length; i++) destroyItem(fallingItems[i]);
+      for (let i = 0; i < masonryTileList.length; i++) {
+        if (masonryTileList[i].activePreStage && masonryTileList[i].activePreStage.stagedMediaEl) {
+          cleanupMediaNode(masonryTileList[i].activePreStage.stagedMediaEl);
+        }
+        if (masonryTileList[i].pendingReady && masonryTileList[i].pendingReady.media) {
+          cleanupMediaNode(masonryTileList[i].pendingReady.media);
+        }
+        destroyItem(masonryTileList[i]);
+      }
       if (currentSlideItem) destroyItem(currentSlideItem);
       if (previousSlideItem) destroyItem(previousSlideItem);
 
       activeItems = [];
-      collageItems = [];
+      polaroidItems = [];
       fallingItems = [];
+      masonryTileList = [];
+      masonryGroups = [];
+      masonryTreeRoot = null;
+      masonrySwitchTimer = 0;
+
       currentSlideItem = null;
       previousSlideItem = null;
       slideshowTimer = 0;
       slideshowFadeElapsed = 0;
       slideshowIsFading = false;
 
-      clearCollageCanvas();
+      clearPolaroidCanvas();
       coverageGrid.fill(0);
       coveredCellCount = 0;
       screenFullyCovered = false;
@@ -822,17 +1276,17 @@
       fillScreenBurstRemaining = 0;
     }
 
-    function switchDisplayMode(newMode) {
-      if (newMode !== 'scroll' && newMode !== 'collage' && newMode !== 'slideshow') return;
+    function switchDisplayMode(rawNewMode) {
+      const newMode = normalizeModeName(rawNewMode);
       if (DISPLAY_MODE === newMode) return;
       DISPLAY_MODE = newMode;
       clearStageAll();
 
-      if (DISPLAY_MODE === 'collage' && SCREEN_ENABLED) {
-        resizeCollageCanvas(false);
-        collageBaseCanvas.style.display = 'block';
+      if (DISPLAY_MODE === 'polaroid' && SCREEN_ENABLED) {
+        resizePolaroidCanvas(false);
+        polaroidBaseCanvas.style.display = 'block';
       } else {
-        collageBaseCanvas.style.display = 'none';
+        polaroidBaseCanvas.style.display = 'none';
       }
 
       if (DISPLAY_MODE === 'slideshow') {
@@ -840,6 +1294,8 @@
         advanceSlideshowIfReady();
       } else if (DISPLAY_MODE === 'scroll') {
         fillScrollBuffer();
+      } else if (DISPLAY_MODE === 'masonry') {
+        populateMasonryIfNeeded();
       }
 
       pumpPreloader();
@@ -870,6 +1326,133 @@
       return activeItems[0].y;
     }
 
+    // Immediate "Next" action in Scroll mode: places the next queued file right at the incoming viewport edge
+    function spawnImmediateScrollNextItem() {
+      if (DISPLAY_MODE !== 'scroll' || readyImageQueue.length === 0) return;
+      const screenW = window.innerWidth;
+      const screenH = window.innerHeight;
+      if (screenW <= 0 || screenH <= 0) return;
+
+      const ready = readyImageQueue.shift();
+      recordShownMedia(ready);
+      const media = ready.media;
+
+      if (SCROLL_DIRECTION === 'left') {
+        const computedWidth = Math.max(1, ready.aspect * screenH);
+        const shiftAmount = computedWidth + GAP;
+        for (let i = 0; i < activeItems.length; i++) {
+          activeItems[i].x -= shiftAmount;
+          activeItems[i].element.style.transform = `translate3d(${activeItems[i].x}px, 0, 0)`;
+        }
+        const spawnX = activeItems.length === 0 ? 0 : getRightmostEdge() + GAP;
+        media.className = 'slide-item';
+        media.style.width = `${computedWidth}px`;
+        media.style.height = `${screenH}px`;
+        media.style.transform = `translate3d(${spawnX}px, 0, 0)`;
+        stage.appendChild(media);
+        if (ready.isVideo) {
+          enforceSilentVideo(media);
+          media.play().catch(() => {});
+        }
+        activeItems.push({
+          element: media,
+          mediaElement: media,
+          isVideo: ready.isVideo,
+          isAnimated: ready.isAnimated,
+          x: spawnX,
+          y: 0,
+          width: computedWidth,
+          height: screenH,
+          aspect: ready.aspect
+        });
+      } else if (SCROLL_DIRECTION === 'right') {
+        const computedWidth = Math.max(1, ready.aspect * screenH);
+        const shiftAmount = computedWidth + GAP;
+        for (let i = 0; i < activeItems.length; i++) {
+          activeItems[i].x += shiftAmount;
+          activeItems[i].element.style.transform = `translate3d(${activeItems[i].x}px, 0, 0)`;
+        }
+        const spawnX = activeItems.length === 0 ? (screenW - computedWidth) : (getLeftmostEdge() - computedWidth - GAP);
+        media.className = 'slide-item';
+        media.style.width = `${computedWidth}px`;
+        media.style.height = `${screenH}px`;
+        media.style.transform = `translate3d(${spawnX}px, 0, 0)`;
+        stage.appendChild(media);
+        if (ready.isVideo) {
+          enforceSilentVideo(media);
+          media.play().catch(() => {});
+        }
+        activeItems.unshift({
+          element: media,
+          mediaElement: media,
+          isVideo: ready.isVideo,
+          isAnimated: ready.isAnimated,
+          x: spawnX,
+          y: 0,
+          width: computedWidth,
+          height: screenH,
+          aspect: ready.aspect
+        });
+      } else if (SCROLL_DIRECTION === 'up') {
+        const computedHeight = Math.max(1, screenW / Math.max(0.05, ready.aspect));
+        const shiftAmount = computedHeight + GAP;
+        for (let i = 0; i < activeItems.length; i++) {
+          activeItems[i].y -= shiftAmount;
+          activeItems[i].element.style.transform = `translate3d(0, ${activeItems[i].y}px, 0)`;
+        }
+        const spawnY = activeItems.length === 0 ? 0 : getBottommostEdge() + GAP;
+        media.className = 'slide-item';
+        media.style.width = `${screenW}px`;
+        media.style.height = `${computedHeight}px`;
+        media.style.transform = `translate3d(0, ${spawnY}px, 0)`;
+        stage.appendChild(media);
+        if (ready.isVideo) {
+          enforceSilentVideo(media);
+          media.play().catch(() => {});
+        }
+        activeItems.push({
+          element: media,
+          mediaElement: media,
+          isVideo: ready.isVideo,
+          isAnimated: ready.isAnimated,
+          x: 0,
+          y: spawnY,
+          width: screenW,
+          height: computedHeight,
+          aspect: ready.aspect
+        });
+      } else if (SCROLL_DIRECTION === 'down') {
+        const computedHeight = Math.max(1, screenW / Math.max(0.05, ready.aspect));
+        const shiftAmount = computedHeight + GAP;
+        for (let i = 0; i < activeItems.length; i++) {
+          activeItems[i].y += shiftAmount;
+          activeItems[i].element.style.transform = `translate3d(0, ${activeItems[i].y}px, 0)`;
+        }
+        const spawnY = activeItems.length === 0 ? (screenH - computedHeight) : (getTopmostEdge() - computedHeight - GAP);
+        media.className = 'slide-item';
+        media.style.width = `${screenW}px`;
+        media.style.height = `${computedHeight}px`;
+        media.style.transform = `translate3d(0, ${spawnY}px, 0)`;
+        stage.appendChild(media);
+        if (ready.isVideo) {
+          enforceSilentVideo(media);
+          media.play().catch(() => {});
+        }
+        activeItems.unshift({
+          element: media,
+          mediaElement: media,
+          isVideo: ready.isVideo,
+          isAnimated: ready.isAnimated,
+          x: 0,
+          y: spawnY,
+          width: screenW,
+          height: computedHeight,
+          aspect: ready.aspect
+        });
+      }
+      pumpPreloader();
+    }
+
     function fillScrollBuffer() {
       if (DISPLAY_MODE !== 'scroll' || APP_PAUSED || !SCREEN_ENABLED) return;
 
@@ -882,6 +1465,7 @@
       if (SCROLL_DIRECTION === 'left') {
         while (readyImageQueue.length > 0 && getRightmostEdge() < screenW * 3.5) {
           const ready = readyImageQueue.shift();
+          recordShownMedia(ready);
           const media = ready.media;
           const computedWidth = Math.max(1, ready.aspect * screenH);
           const spawnX = activeItems.length === 0 ? 0 : getRightmostEdge() + GAP;
@@ -913,6 +1497,7 @@
       } else if (SCROLL_DIRECTION === 'right') {
         while (readyImageQueue.length > 0 && getLeftmostEdge() > -screenW * 2.5) {
           const ready = readyImageQueue.shift();
+          recordShownMedia(ready);
           const media = ready.media;
           const computedWidth = Math.max(1, ready.aspect * screenH);
           const spawnX = activeItems.length === 0
@@ -946,6 +1531,7 @@
       } else if (SCROLL_DIRECTION === 'up') {
         while (readyImageQueue.length > 0 && getBottommostEdge() < screenH * 3.5) {
           const ready = readyImageQueue.shift();
+          recordShownMedia(ready);
           const media = ready.media;
           const computedHeight = Math.max(1, screenW / Math.max(0.05, ready.aspect));
           const spawnY = activeItems.length === 0 ? 0 : getBottommostEdge() + GAP;
@@ -977,6 +1563,7 @@
       } else if (SCROLL_DIRECTION === 'down') {
         while (readyImageQueue.length > 0 && getTopmostEdge() > -screenH * 2.5) {
           const ready = readyImageQueue.shift();
+          recordShownMedia(ready);
           const media = ready.media;
           const computedHeight = Math.max(1, screenW / Math.max(0.05, ready.aspect));
           const spawnY = activeItems.length === 0
@@ -1104,7 +1691,7 @@
     }
 
     // =========================================================================
-    // MODE 2: CONTINUOUS STACKING POLAROID COLLAGE
+    // MODE 2: CONTINUOUS STACKING POLAROID
     // =========================================================================
     function chooseSmartLandingSpot(totalW, totalH) {
       const sw = window.innerWidth;
@@ -1134,8 +1721,8 @@
         }
       }
 
-      if (collageItems.length > 0 && Math.random() < 0.35) {
-        const oldestId = collageItems[0].id;
+      if (polaroidItems.length > 0 && Math.random() < 0.35) {
+        const oldestId = polaroidItems[0].id;
         const oldestCells = [];
         for (let i = 0; i < TOTAL_GRID_CELLS; i++) {
           if (coverageGrid[i] === oldestId) oldestCells.push(i);
@@ -1204,12 +1791,12 @@
       }
     }
 
-    function pruneCollageStackIfNeeded() {
+    function prunePolaroidStackIfNeeded() {
       const visibleIds = new Set(coverageGrid);
       const remaining = [];
 
-      for (let i = 0; i < collageItems.length; i++) {
-        const item = collageItems[i];
+      for (let i = 0; i < polaroidItems.length; i++) {
+        const item = polaroidItems[i];
         if (!visibleIds.has(item.id)) {
           item.occludedDrops = (item.occludedDrops || 0) + 1;
         } else {
@@ -1223,12 +1810,12 @@
           remaining.push(item);
         }
       }
-      collageItems = remaining;
+      polaroidItems = remaining;
 
       let idx = 0;
-      while (collageItems.length > MAX_LIVE_COLLAGE_DOM && idx < collageItems.length) {
-        if (!collageItems[idx].isAnimated) {
-          const [staticItem] = collageItems.splice(idx, 1);
+      while (polaroidItems.length > MAX_LIVE_POLAROID_DOM && idx < polaroidItems.length) {
+        if (!polaroidItems[idx].isAnimated) {
+          const [staticItem] = polaroidItems.splice(idx, 1);
           bakePolaroidToCanvas(staticItem);
           destroyItem(staticItem);
         } else {
@@ -1236,15 +1823,15 @@
         }
       }
 
-      while (collageItems.length > MAX_LIVE_COLLAGE_DOM + 10) {
-        const oldest = collageItems.shift();
+      while (polaroidItems.length > MAX_LIVE_POLAROID_DOM + 10) {
+        const oldest = polaroidItems.shift();
         bakePolaroidToCanvas(oldest);
         destroyItem(oldest);
       }
     }
 
-    function spawnNextCollageItem() {
-      if (DISPLAY_MODE !== 'collage' || readyImageQueue.length === 0 || APP_PAUSED || !SCREEN_ENABLED) {
+    function spawnNextPolaroidItem() {
+      if (DISPLAY_MODE !== 'polaroid' || readyImageQueue.length === 0 || APP_PAUSED || !SCREEN_ENABLED) {
         pumpPreloader();
         return false;
       }
@@ -1253,6 +1840,7 @@
       }
 
       const ready = readyImageQueue.shift();
+      recordShownMedia(ready);
       pumpPreloader();
 
       const media = ready.media;
@@ -1271,8 +1859,8 @@
         media.play().catch(() => {});
       }
 
-      const minS = Math.min(COLLAGE_MIN_SIZE, COLLAGE_MAX_SIZE);
-      const maxS = Math.max(COLLAGE_MIN_SIZE, COLLAGE_MAX_SIZE);
+      const minS = Math.min(POLAROID_MIN_SIZE, POLAROID_MAX_SIZE);
+      const maxS = Math.max(POLAROID_MIN_SIZE, POLAROID_MAX_SIZE);
       const randomBaseSize = minS + Math.random() * (maxS - minS);
 
       let imgW, imgH;
@@ -1298,7 +1886,7 @@
       const startX = (window.innerWidth - totalW) * 0.5 + (landing.x - (window.innerWidth - totalW) * 0.5) * 0.35;
       const startY = (window.innerHeight - totalH) * 0.5 + (landing.y - (window.innerHeight - totalH) * 0.5) * 0.35;
 
-      const fallDuration = Math.max(0.25, 1.15 / Math.max(0.2, COLLAGE_DROP_SPEED));
+      const fallDuration = Math.max(0.25, 1.15 / Math.max(0.2, POLAROID_DROP_SPEED));
 
       const itemObj = {
         id: nextPolaroidId++,
@@ -1327,18 +1915,18 @@
       return true;
     }
 
-    function updateCollageMode(deltaTime) {
+    function updatePolaroidMode(deltaTime) {
       if (WALLPAPER_PAUSED) return;
 
       if (fillScreenBurstRemaining > 0) {
         drainFillScreenBurst();
       } else {
         timeSinceLastDrop += deltaTime;
-        const baseInterval = Math.max(0.25, 1.6 / Math.max(0.2, COLLAGE_DROP_SPEED));
-        const spawnInterval = baseInterval + Math.max(0, Math.min(600, COLLAGE_DROP_DELAY));
+        const baseInterval = Math.max(0.25, 1.6 / Math.max(0.2, POLAROID_DROP_SPEED));
+        const spawnInterval = baseInterval + Math.max(0, Math.min(600, POLAROID_DROP_DELAY));
 
         if (timeSinceLastDrop >= spawnInterval) {
-          if (spawnNextCollageItem()) {
+          if (spawnNextPolaroidItem()) {
             timeSinceLastDrop = 0;
           } else {
             timeSinceLastDrop = spawnInterval - 0.25;
@@ -1368,9 +1956,9 @@
           item.element.style.transform = `translate3d(${item.targetX.toFixed(1)}px, ${item.targetY.toFixed(1)}px, 0) scale(1) rotate(${item.targetRot.toFixed(2)}deg)`;
 
           fallingItems.splice(i, 1);
-          collageItems.push(item);
+          polaroidItems.push(item);
 
-          pruneCollageStackIfNeeded();
+          prunePolaroidStackIfNeeded();
         }
       }
     }
@@ -1391,8 +1979,11 @@
       return null;
     }
 
-    function advanceSlideshowIfReady() {
-      if (DISPLAY_MODE !== 'slideshow' || APP_PAUSED || !SCREEN_ENABLED || slideshowIsFading) {
+    function advanceSlideshowIfReady(forceInstantWhenManual = false) {
+      if (DISPLAY_MODE !== 'slideshow' || APP_PAUSED || !SCREEN_ENABLED) {
+        return false;
+      }
+      if (slideshowIsFading && !forceInstantWhenManual) {
         return false;
       }
 
@@ -1400,11 +1991,12 @@
       pumpPreloader();
       if (!nextReady) return false;
 
+      recordShownMedia(nextReady);
+
       const media = nextReady.media;
       media.className = 'slideshow-item';
       media.style.zIndex = '2';
 
-      // Slider 0..10 maps linearly to 0.0s..1.0s fade transition
       const fadeSec = Math.max(0, Math.min(10, SLIDESHOW_FADE)) / 10.0;
 
       if (!currentSlideItem || fadeSec <= 0.005) {
@@ -1508,6 +2100,1157 @@
     }
 
     // =========================================================================
+    // MODE 4: MASONRY LAYOUT (MONDRIAN BSP + ROWS JUSTIFIED LAYOUT +
+    //         BACKGROUND PRE-RENDERING & PRE-ORGANIZATION OF NEXT MEDIA SWITCH)
+    // =========================================================================
+
+    function syncStageRowsModeClass() {
+      if (!stage) return;
+      if (DISPLAY_MODE === 'masonry' && MASONRY_LAYOUT === 'rows') {
+        stage.classList.add('rows-mode');
+      } else {
+        stage.classList.remove('rows-mode');
+      }
+    }
+
+    function computeAmbientBackdropDataUrl(mediaEl) {
+      if (!mediaEl || !ambientSampleCtx) return '';
+      try {
+        if (mediaEl.tagName === 'VIDEO' && mediaEl.readyState < 2) {
+          return '';
+        }
+        ambientSampleCtx.clearRect(0, 0, 24, 24);
+        ambientSampleCtx.drawImage(mediaEl, 0, 0, 24, 24);
+        ambientSampleCtx.fillStyle = 'rgba(10, 10, 14, 0.44)';
+        ambientSampleCtx.fillRect(0, 0, 24, 24);
+        return ambientSampleCanvas.toDataURL('image/jpeg', 0.65);
+      } catch (e) {
+        return '';
+      }
+    }
+
+    // Applies the pre-baked 24x24 color-matched ambient backdrop in Mondrian mode,
+    // or removes the blurred/ambient backdrop completely when Rows mode is active.
+    function applyTileAmbientBackdrop(flipInner, mediaEl, isVideo, precomputedUrl) {
+      if (!flipInner) return;
+      if (MASONRY_LAYOUT === 'rows') {
+        flipInner.style.backgroundImage = 'none';
+        return;
+      }
+      if (precomputedUrl) {
+        flipInner.style.backgroundImage = `url("${precomputedUrl}")`;
+        return;
+      }
+      if (!mediaEl) return;
+      const assignFromMedia = () => {
+        if (MASONRY_LAYOUT === 'rows') {
+          flipInner.style.backgroundImage = 'none';
+          return;
+        }
+        const url = computeAmbientBackdropDataUrl(mediaEl);
+        if (url) {
+          flipInner.style.backgroundImage = `url("${url}")`;
+        }
+      };
+      if (isVideo && mediaEl.readyState < 2) {
+        mediaEl.addEventListener('loadeddata', assignFromMedia, { once: true });
+      } else {
+        assignFromMedia();
+      }
+    }
+
+    function clampTileAspect(aspect) {
+      return Math.max(0.28, Math.min(3.6, Number(aspect) || 1.0));
+    }
+
+    // Builds a binary tree skeleton over an array of leaf items (tiles or groups)
+    function buildBinarySubtreeNodes(items, internalList) {
+      if (items.length === 1) {
+        return {
+          isLeaf: true,
+          item: items[0],
+          effAspect: clampTileAspect(items[0].aspect) * (items[0].sizeJitter || 1.0),
+          splitVertically: true,
+          ratio: 0.5
+        };
+      }
+      const mid = Math.floor(items.length / 2);
+      const left = buildBinarySubtreeNodes(items.slice(0, mid), internalList);
+      const right = buildBinarySubtreeNodes(items.slice(mid), internalList);
+      const node = {
+        isLeaf: false,
+        left,
+        right,
+        effAspect: 1.0,
+        splitVertically: true,
+        ratio: 0.5
+      };
+      if (internalList) internalList.push(node);
+      return node;
+    }
+
+    // Bottom-up exact aspect ratio propagation for a given split-direction assignment
+    function propagateAspectBottomUp(node) {
+      if (!node) return 1.0;
+      if (node.isLeaf) {
+        const baseA = clampTileAspect(node.item.aspect);
+        const jitter = Number(node.item.sizeJitter) || 1.0;
+        node.effAspect = Math.max(0.22, Math.min(4.2, baseA * jitter));
+        return node.effAspect;
+      }
+      const aL = propagateAspectBottomUp(node.left);
+      const aR = propagateAspectBottomUp(node.right);
+      if (node.splitVertically) {
+        const sumA = Math.max(0.1, aL + aR);
+        node.effAspect = sumA;
+        node.ratio = Math.max(0.22, Math.min(0.78, aL / sumA));
+      } else {
+        const invL = 1.0 / Math.max(0.1, aL);
+        const invR = 1.0 / Math.max(0.1, aR);
+        const invSum = Math.max(0.05, invL + invR);
+        node.effAspect = 1.0 / invSum;
+        node.ratio = Math.max(0.22, Math.min(0.78, invL / invSum));
+      }
+      return node.effAspect;
+    }
+
+    // Evaluates total log-aspect distortion of leaves if laid out inside (w, h)
+    function evaluateSubtreeDistortion(node, w, h, gap) {
+      if (!node) return 0;
+      if (node.isLeaf) {
+        const safeW = Math.max(8, w);
+        const safeH = Math.max(8, h);
+        const boxAspect = safeW / safeH;
+        const mediaAspect = clampTileAspect(node.item.aspect);
+        const logDiff = Math.abs(Math.log(boxAspect / mediaAspect));
+        const minDimPenalty = (safeW < 64 || safeH < 64) ? 1.5 : 0;
+        return logDiff + minDimPenalty;
+      }
+      if (node.splitVertically) {
+        const availW = Math.max(16, w - gap);
+        const leftW = availW * node.ratio;
+        const rightW = availW - leftW;
+        return (
+          evaluateSubtreeDistortion(node.left, leftW, h, gap) +
+          evaluateSubtreeDistortion(node.right, rightW, h, gap)
+        );
+      } else {
+        const availH = Math.max(16, h - gap);
+        const topH = availH * node.ratio;
+        const bottomH = availH - topH;
+        return (
+          evaluateSubtreeDistortion(node.left, w, topH, gap) +
+          evaluateSubtreeDistortion(node.right, w, bottomH, gap)
+        );
+      }
+    }
+
+    function solveAspectLockedSubtree(items, boxW, boxH, gap, prevMask = null, allowReorder = true) {
+      if (!items || items.length === 0) return null;
+      if (items.length === 1) {
+        const single = buildBinarySubtreeNodes(items, null);
+        propagateAspectBottomUp(single);
+        single._orderedItems = items.slice();
+        return single;
+      }
+
+      const candidateOrders = [items.slice()];
+      if (allowReorder && items.length >= 3) {
+        candidateOrders.push(items.slice().sort((a, b) => a.aspect - b.aspect));
+        candidateOrders.push(items.slice().sort((a, b) => b.aspect - a.aspect));
+      }
+
+      let bestRoot = null;
+      let bestScore = Infinity;
+      const targetBoxAspect = Math.max(0.2, boxW / Math.max(1, boxH));
+
+      for (let o = 0; o < candidateOrders.length; o++) {
+        const internals = [];
+        const root = buildBinarySubtreeNodes(candidateOrders[o], internals);
+        const numInternals = internals.length;
+
+        if (numInternals <= 5) {
+          const totalMasks = 1 << numInternals;
+          for (let mask = 0; mask < totalMasks; mask++) {
+            let flipDirectionChanges = 0;
+            for (let b = 0; b < numInternals; b++) {
+              const isVert = Boolean((mask >> b) & 1);
+              internals[b].splitVertically = isVert;
+              if (typeof prevMask === 'number' && Boolean((prevMask >> b) & 1) !== isVert) {
+                flipDirectionChanges++;
+              }
+            }
+            const rootAspect = propagateAspectBottomUp(root);
+            const leafError = evaluateSubtreeDistortion(root, boxW, boxH, gap);
+            const rootMatchError = Math.abs(Math.log(rootAspect / targetBoxAspect)) * 0.45;
+            const stabilityPenalty = flipDirectionChanges * 0.24;
+            const totalScore = leafError + rootMatchError + stabilityPenalty;
+            if (totalScore < bestScore) {
+              bestScore = totalScore;
+              bestRoot = root;
+              bestRoot._winMask = mask;
+              bestRoot._internals = internals;
+              bestRoot._orderedItems = candidateOrders[o];
+            }
+          }
+        } else {
+          const assignGreedy = (nd, cw, ch) => {
+            if (!nd || nd.isLeaf) return;
+            nd.splitVertically = (cw / Math.max(1, ch)) >= 1.02;
+            propagateAspectBottomUp(nd);
+            if (nd.splitVertically) {
+              const aw = Math.max(16, cw - gap);
+              assignGreedy(nd.left, aw * nd.ratio, ch);
+              assignGreedy(nd.right, aw * (1 - nd.ratio), ch);
+            } else {
+              const ah = Math.max(16, ch - gap);
+              assignGreedy(nd.left, cw, ah * nd.ratio);
+              assignGreedy(nd.right, cw, ah * (1 - nd.ratio));
+            }
+          };
+          assignGreedy(root, boxW, boxH);
+          propagateAspectBottomUp(root);
+          root._orderedItems = candidateOrders[o];
+          bestRoot = root;
+          break;
+        }
+      }
+
+      if (bestRoot && bestRoot._internals && typeof bestRoot._winMask === 'number') {
+        const mask = bestRoot._winMask;
+        const internals = bestRoot._internals;
+        for (let b = 0; b < internals.length; b++) {
+          internals[b].splitVertically = Boolean((mask >> b) & 1);
+        }
+        propagateAspectBottomUp(bestRoot);
+      }
+      return bestRoot;
+    }
+
+    function applySubtreeGeometry(node, x, y, w, h, gap, onLeafRect) {
+      if (!node) return;
+      if (node.isLeaf) {
+        const rx = Math.round(x);
+        const ry = Math.round(y);
+        const rw = Math.max(16, Math.round(w));
+        const rh = Math.max(16, Math.round(h));
+        onLeafRect(node.item, rx, ry, rw, rh);
+        return;
+      }
+      if (node.splitVertically) {
+        const availW = Math.max(0, w - gap);
+        const leftW = Math.round(availW * node.ratio);
+        const rightW = Math.max(0, availW - leftW);
+        applySubtreeGeometry(node.left, x, y, leftW, h, gap, onLeafRect);
+        applySubtreeGeometry(node.right, x + leftW + gap, y, rightW, h, gap, onLeafRect);
+      } else {
+        const availH = Math.max(0, h - gap);
+        const topH = Math.round(availH * node.ratio);
+        const bottomH = Math.max(0, availH - topH);
+        applySubtreeGeometry(node.left, x, y, w, topH, gap, onLeafRect);
+        applySubtreeGeometry(node.right, x, y + topH + gap, w, bottomH, gap, onLeafRect);
+      }
+    }
+
+    function commitTileGeometryImmediate(tile, x, y, w, h) {
+      tile.x = x;
+      tile.y = y;
+      tile.w = w;
+      tile.h = h;
+      tile.isReflowing = false;
+      tile.flipReflowElapsed = 0;
+      if (tile.element) {
+        tile.element.classList.remove('is-reflowing');
+        tile.element.style.width = `${w}px`;
+        tile.element.style.height = `${h}px`;
+        tile.element.style.transform = `translate3d(${x}px, ${y}px, 0)`;
+      }
+    }
+
+    function applyTileTargetRectWithFlip(tile, nx, ny, nw, nh, oldRect, snapImmediately = false) {
+      tile.x = nx;
+      tile.y = ny;
+      tile.w = nw;
+      tile.h = nh;
+      if (tile.element) {
+        tile.element.style.width = `${nw}px`;
+        tile.element.style.height = `${nh}px`;
+      }
+
+      if (!oldRect || snapImmediately) {
+        tile.isReflowing = false;
+        tile.flipReflowElapsed = 0;
+        if (tile.element) {
+          tile.element.classList.remove('is-reflowing');
+          tile.element.style.transform = `translate3d(${nx}px, ${ny}px, 0)`;
+        }
+        return;
+      }
+
+      const dx = oldRect.x - nx;
+      const dy = oldRect.y - ny;
+      const sx = oldRect.w / Math.max(1, nw);
+      const sy = oldRect.h / Math.max(1, nh);
+
+      if (Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5 && Math.abs(sx - 1) < 0.005 && Math.abs(sy - 1) < 0.005) {
+        tile.isReflowing = false;
+        if (tile.element) {
+          tile.element.classList.remove('is-reflowing');
+          tile.element.style.transform = `translate3d(${nx}px, ${ny}px, 0)`;
+        }
+      } else {
+        tile.flipFromX = dx;
+        tile.flipFromY = dy;
+        tile.flipFromSX = sx;
+        tile.flipFromSY = sy;
+        tile.flipReflowElapsed = 0;
+        tile.isReflowing = true;
+        if (tile.element) {
+          tile.element.classList.add('is-reflowing');
+          tile.element.style.transform = `translate3d(${oldRect.x.toFixed(1)}px, ${oldRect.y.toFixed(1)}px, 0) scale3d(${sx.toFixed(4)}, ${sy.toFixed(4)}, 1)`;
+        }
+      }
+    }
+
+    function getTileCurrentVisualRect(tile) {
+      if (!tile.isReflowing) {
+        return { x: tile.x, y: tile.y, w: tile.w, h: tile.h };
+      }
+      const p = Math.min(1.0, tile.flipReflowElapsed / MASONRY_REFLOW_DURATION_SEC);
+      const ease = 1 - Math.pow(1 - p, 3);
+      const curX = tile.x + tile.flipFromX * (1 - ease);
+      const curY = tile.y + tile.flipFromY * (1 - ease);
+      const curSX = 1 + (tile.flipFromSX - 1) * (1 - ease);
+      const curSY = 1 + (tile.flipFromSY - 1) * (1 - ease);
+      return {
+        x: curX,
+        y: curY,
+        w: tile.w * curSX,
+        h: tile.h * curSY
+      };
+    }
+
+    // -------------------------------------------------------------------------
+    // ENGINE B: ROWS (GOOGLE PHOTOS JUSTIFIED HORIZONTAL ROWS SOLVER)
+    // -------------------------------------------------------------------------
+    function computeGooglePhotosRowRects(rowGroup) {
+      const rectMap = new Map();
+      if (!rowGroup || !rowGroup.tiles || rowGroup.tiles.length === 0) return rectMap;
+      const gap = Math.max(0, Math.min(10, Number(MASONRY_GAP) || 0));
+      const tiles = rowGroup.tiles;
+      const n = tiles.length;
+      const totalGapW = gap * Math.max(0, n - 1);
+      const availW = Math.max(n * 16, rowGroup.w - totalGapW);
+
+      let sumAspect = 0;
+      const effAspects = [];
+      for (let i = 0; i < n; i++) {
+        const a = clampTileAspect(tiles[i].aspect);
+        effAspects.push(a);
+        sumAspect += a;
+      }
+      sumAspect = Math.max(0.1, sumAspect);
+
+      let curX = rowGroup.x;
+      for (let i = 0; i < n; i++) {
+        const tile = tiles[i];
+        const isLast = (i === n - 1);
+        const rawW = availW * (effAspects[i] / sumAspect);
+        const tw = isLast
+          ? Math.max(16, (rowGroup.x + rowGroup.w) - curX)
+          : Math.max(16, Math.round(rawW));
+        const tx = Math.round(curX);
+        const ty = Math.round(rowGroup.y);
+        const th = Math.max(16, Math.round(rowGroup.h));
+        rectMap.set(tile.id, { x: tx, y: ty, w: tw, h: th });
+        curX += tw + gap;
+      }
+      return rectMap;
+    }
+
+    function layoutGooglePhotosRowTiles(rowGroup, prevRectsMap = null, flippedTileId = null) {
+      if (!rowGroup || !rowGroup.tiles || rowGroup.tiles.length === 0) return;
+      const rectMap = computeGooglePhotosRowRects(rowGroup);
+      for (let i = 0; i < rowGroup.tiles.length; i++) {
+        const tile = rowGroup.tiles[i];
+        const target = rectMap.get(tile.id);
+        if (!target) continue;
+        if (prevRectsMap) {
+          const old = prevRectsMap.get(tile.id);
+          applyTileTargetRectWithFlip(tile, target.x, target.y, target.w, target.h, old, tile.id === flippedTileId);
+        } else {
+          commitTileGeometryImmediate(tile, target.x, target.y, target.w, target.h);
+        }
+      }
+    }
+
+    function buildGooglePhotosJustifiedLayout(prevRectsMap = null) {
+      const sw = window.innerWidth;
+      const sh = window.innerHeight;
+      if (sw <= 0 || sh <= 0 || masonryTileList.length === 0) return;
+      const gap = Math.max(0, Math.min(10, Number(MASONRY_GAP) || 0));
+      const totalTiles = masonryTileList.length;
+
+      let meanAspect = 0;
+      for (let i = 0; i < totalTiles; i++) {
+        meanAspect += clampTileAspect(masonryTileList[i].aspect);
+      }
+      meanAspect = meanAspect / Math.max(1, totalTiles);
+
+      const idealRows = Math.round(Math.sqrt((totalTiles * sh * meanAspect) / Math.max(1, sw)));
+      const numRows = Math.max(
+        totalTiles >= 4 ? 2 : 1,
+        Math.min(Math.ceil(totalTiles / 2), idealRows || 2)
+      );
+
+      masonryGroups = [];
+      masonryTreeRoot = null;
+
+      let startIdx = 0;
+      const rawIdealHeights = [];
+      let totalIdealHeight = 0;
+
+      for (let r = 0; r < numRows; r++) {
+        const remainingTiles = totalTiles - startIdx;
+        const remainingRows = numRows - r;
+        const count = Math.max(1, Math.round(remainingTiles / remainingRows));
+        const slice = masonryTileList.slice(startIdx, startIdx + count);
+        startIdx += count;
+
+        let rowAspectSum = 0;
+        for (let i = 0; i < slice.length; i++) {
+          slice[i].groupIndex = r;
+          rowAspectSum += clampTileAspect(slice[i].aspect);
+        }
+        rowAspectSum = Math.max(0.2, rowAspectSum);
+
+        const rowAvailW = Math.max(64, sw - gap * Math.max(0, slice.length - 1));
+        const idealH = rowAvailW / rowAspectSum;
+        rawIdealHeights.push(idealH);
+        totalIdealHeight += idealH;
+
+        masonryGroups.push({
+          index: r,
+          tiles: slice,
+          aspect: rowAspectSum,
+          sizeJitter: 1.0,
+          subtreeRoot: null,
+          x: 0,
+          y: 0,
+          w: sw,
+          h: 100
+        });
+      }
+
+      const totalRowGaps = gap * Math.max(0, numRows - 1);
+      const availScreenH = Math.max(numRows * 32, sh - totalRowGaps);
+      const heightScale = availScreenH / Math.max(1, totalIdealHeight);
+
+      let curY = 0;
+      for (let r = 0; r < numRows; r++) {
+        const rowGroup = masonryGroups[r];
+        rowGroup.index = r;
+        const isLastRow = (r === numRows - 1);
+        const rh = isLastRow
+          ? Math.max(24, sh - curY)
+          : Math.max(24, Math.round(rawIdealHeights[r] * heightScale));
+
+        rowGroup.x = 0;
+        rowGroup.y = curY;
+        rowGroup.w = sw;
+        rowGroup.h = rh;
+
+        for (let i = 0; i < rowGroup.tiles.length; i++) {
+          rowGroup.tiles[i].groupIndex = r;
+        }
+
+        layoutGooglePhotosRowTiles(rowGroup, prevRectsMap, null);
+        curY += rh + gap;
+      }
+    }
+
+    // -------------------------------------------------------------------------
+    // BACKGROUND PRE-ORGANIZATION & PRE-RENDERING OF NEXT MEDIA SWITCH
+    // -------------------------------------------------------------------------
+    function clearPreStagedMasonrySwitch(requeueMedia = true) {
+      if (!preStagedMasonryPlan) return;
+      const plan = preStagedMasonryPlan;
+      preStagedMasonryPlan = null;
+
+      if (plan.stagedMediaEl && plan.stagedMediaEl.parentNode) {
+        plan.stagedMediaEl.parentNode.removeChild(plan.stagedMediaEl);
+      }
+      if (plan.stagedMediaEl) {
+        plan.stagedMediaEl.className = 'masonry-media';
+      }
+
+      if (requeueMedia && plan.ready && plan.ready.media && readyImageQueue.length < 36) {
+        readyImageQueue.unshift(plan.ready);
+      } else if (plan.ready && plan.ready.media) {
+        cleanupMediaNode(plan.ready.media);
+      }
+    }
+
+    function cancelActiveMasonryFlipsAndPlans() {
+      clearPreStagedMasonrySwitch(true);
+      for (let i = 0; i < masonryTileList.length; i++) {
+        const t = masonryTileList[i];
+        if (t.activePreStage) {
+          const ap = t.activePreStage;
+          t.activePreStage = null;
+          if (ap.stagedMediaEl && ap.stagedMediaEl !== t.mediaElement) {
+            if (ap.stagedMediaEl.parentNode) {
+              ap.stagedMediaEl.parentNode.removeChild(ap.stagedMediaEl);
+            }
+            cleanupMediaNode(ap.stagedMediaEl);
+          }
+        }
+        if (t.pendingReady && t.pendingReady.media) {
+          if (t.pendingReady.media !== t.mediaElement) {
+            cleanupMediaNode(t.pendingReady.media);
+          }
+          t.pendingReady = null;
+        }
+        if (t.isFlipping) {
+          t.isFlipping = false;
+          t.flipPhase = 0;
+          t.flipElapsed = 0;
+          if (t.flipInner) {
+            t.flipInner.style.transform = '';
+          }
+          if (t.element) {
+            t.element.classList.remove('is-flipping');
+          }
+        }
+      }
+    }
+
+    // Pre-calculates the exact target rectangles for a local group or horizontal row in the background
+    // BEFORE the flip animation starts so zero layout solver math runs at the 90-degree midpoint
+    function precomputeGroupReflowPlan(groupIndex, flippedTileId, newAspect, newSizeJitter) {
+      const group = masonryGroups[groupIndex];
+      if (!group || !group.tiles || group.tiles.length === 0) return null;
+      const gap = Math.max(0, Math.min(10, Number(MASONRY_GAP) || 0));
+
+      // Create lightweight proxy items reflecting the incoming media's aspect ratio
+      const proxyItems = group.tiles.map(t => ({
+        id: t.id,
+        tileRef: t,
+        aspect: t.id === flippedTileId ? clampTileAspect(newAspect) : clampTileAspect(t.aspect),
+        sizeJitter: t.id === flippedTileId ? newSizeJitter : t.sizeJitter
+      }));
+
+      const plannedRects = new Map();
+
+      if (MASONRY_LAYOUT === 'rows') {
+        const fakeRowGroup = {
+          x: group.x,
+          y: group.y,
+          w: group.w,
+          h: group.h,
+          tiles: proxyItems
+        };
+        const rowMap = computeGooglePhotosRowRects(fakeRowGroup);
+        rowMap.forEach((rect, id) => plannedRects.set(id, rect));
+        return {
+          layoutMode: 'rows',
+          groupIndex,
+          plannedRects,
+          winMask: null
+        };
+      }
+
+      const prevMask = (group.subtreeRoot && typeof group.subtreeRoot._winMask === 'number')
+        ? group.subtreeRoot._winMask
+        : null;
+      const solvedRoot = solveAspectLockedSubtree(proxyItems, group.w, group.h, gap, prevMask, false);
+      applySubtreeGeometry(solvedRoot, group.x, group.y, group.w, group.h, gap, (proxy, nx, ny, nw, nh) => {
+        plannedRects.set(proxy.id, { x: nx, y: ny, w: nw, h: nh });
+      });
+
+      return {
+        layoutMode: 'mondrian',
+        groupIndex,
+        plannedRects,
+        winMask: solvedRoot ? solvedRoot._winMask : prevMask
+      };
+    }
+
+    // Pre-stages the next tile flip in the background ~1.2s before the flip timer expires:
+    // 1. Pre-mounts the incoming media element in a hidden DOM back-layer (.pre-staged-media) so its GPU texture is rasterized ahead of time
+    // 2. Pre-solves the row/subgroup reflow geometry in memory so the 90-degree midpoint does zero solver math
+    function preStageNextMasonrySwitch() {
+      if (preStagedMasonryPlan || DISPLAY_MODE !== 'masonry' || masonryTileList.length === 0 || readyImageQueue.length === 0) {
+        return false;
+      }
+
+      for (let i = 0; i < masonryTileList.length; i++) {
+        if (masonryTileList[i].isFlipping || masonryTileList[i].isReflowing) {
+          return false;
+        }
+      }
+
+      const eligible = masonryTileList.filter(t => !t.isFlipping && t.hasPlayedOnce);
+      if (eligible.length === 0) return false;
+
+      const chosenTile = eligible[Math.floor(Math.random() * eligible.length)];
+      const nextReady = readyImageQueue.shift();
+      pumpPreloader();
+
+      if (MASONRY_LAYOUT === 'mondrian' && !nextReady.ambientBgUrl && nextReady.media) {
+        nextReady.ambientBgUrl = computeAmbientBackdropDataUrl(nextReady.media);
+      }
+
+      const newAspect = clampTileAspect(nextReady.aspect);
+      const newSizeJitter = 0.92 + Math.random() * 0.16;
+
+      // Pre-mount media in hidden back-layer inside chosenTile.flipInner so WebView2 uploads & rasterizes the texture now
+      const stagedMediaEl = nextReady.media;
+      if (stagedMediaEl && chosenTile.flipInner) {
+        stagedMediaEl.className = 'masonry-media pre-staged-media';
+        chosenTile.flipInner.appendChild(stagedMediaEl);
+        if (!nextReady.isVideo && typeof stagedMediaEl.decode === 'function') {
+          stagedMediaEl.decode().catch(() => {});
+        }
+      }
+
+      const reflowPlan = precomputeGroupReflowPlan(chosenTile.groupIndex, chosenTile.id, newAspect, newSizeJitter);
+
+      preStagedMasonryPlan = {
+        tile: chosenTile,
+        ready: nextReady,
+        stagedMediaEl: stagedMediaEl,
+        newAspect: newAspect,
+        newSizeJitter: newSizeJitter,
+        reflowPlan: reflowPlan
+      };
+      return true;
+    }
+
+    // Reflows ONLY the flipped row (in Rows mode) or local group (in Mondrian mode),
+    // using the pre-calculated layout plan when available
+    function reflowMasonryGroupWithFlip(groupIndex, flippedTileId, precomputedReflowPlan = null) {
+      const group = masonryGroups[groupIndex];
+      if (!group || !group.tiles || group.tiles.length === 0) return;
+      const gap = Math.max(0, Math.min(10, Number(MASONRY_GAP) || 0));
+
+      // 1. FIRST: Snapshot current visual rects of tiles in this row / local group
+      const prevRects = new Map();
+      for (let i = 0; i < group.tiles.length; i++) {
+        const t = group.tiles[i];
+        prevRects.set(t.id, getTileCurrentVisualRect(t));
+      }
+
+      // Fast path: Use pre-organized target rects computed before the flip started
+      if (
+        precomputedReflowPlan &&
+        precomputedReflowPlan.layoutMode === MASONRY_LAYOUT &&
+        precomputedReflowPlan.groupIndex === groupIndex &&
+        precomputedReflowPlan.plannedRects
+      ) {
+        if (MASONRY_LAYOUT === 'mondrian' && group.subtreeRoot && typeof precomputedReflowPlan.winMask === 'number') {
+          group.subtreeRoot._winMask = precomputedReflowPlan.winMask;
+        }
+        for (let i = 0; i < group.tiles.length; i++) {
+          const tile = group.tiles[i];
+          const target = precomputedReflowPlan.plannedRects.get(tile.id);
+          if (target) {
+            const old = prevRects.get(tile.id);
+            applyTileTargetRectWithFlip(tile, target.x, target.y, target.w, target.h, old, tile.id === flippedTileId);
+          }
+        }
+        return;
+      }
+
+      // Fallback path if triggered manually without pre-stage:
+      if (MASONRY_LAYOUT === 'rows') {
+        layoutGooglePhotosRowTiles(group, prevRects, flippedTileId);
+        return;
+      }
+
+      const prevMask = (group.subtreeRoot && typeof group.subtreeRoot._winMask === 'number')
+        ? group.subtreeRoot._winMask
+        : null;
+      group.subtreeRoot = solveAspectLockedSubtree(group.tiles, group.w, group.h, gap, prevMask, false);
+      applySubtreeGeometry(group.subtreeRoot, group.x, group.y, group.w, group.h, gap, (tile, nx, ny, nw, nh) => {
+        const old = prevRects.get(tile.id);
+        applyTileTargetRectWithFlip(tile, nx, ny, nw, nh, old, tile.id === flippedTileId);
+      });
+    }
+
+    // Partitions all active tiles and solves the full screen layout for the active Masonry Layout
+    function rebuildFullMasonryLayout(animateTransition = false) {
+      if (DISPLAY_MODE !== 'masonry' || masonryTileList.length === 0) return;
+      syncStageRowsModeClass();
+
+      const sw = window.innerWidth;
+      const sh = window.innerHeight;
+      if (sw <= 0 || sh <= 0) return;
+      const gap = Math.max(0, Math.min(10, Number(MASONRY_GAP) || 0));
+
+      // Update ambient backdrops on all tiles when switching between Mondrian and Rows
+      for (let i = 0; i < masonryTileList.length; i++) {
+        const t = masonryTileList[i];
+        if (t.flipInner) {
+          if (MASONRY_LAYOUT === 'rows') {
+            t.flipInner.style.backgroundImage = 'none';
+          } else {
+            applyTileAmbientBackdrop(t.flipInner, t.mediaElement, t.isVideo, t.ambientBgUrl);
+          }
+        }
+      }
+
+      let prevRectsMap = null;
+      if (animateTransition) {
+        prevRectsMap = new Map();
+        for (let i = 0; i < masonryTileList.length; i++) {
+          const t = masonryTileList[i];
+          prevRectsMap.set(t.id, getTileCurrentVisualRect(t));
+        }
+      }
+
+      if (MASONRY_LAYOUT === 'rows') {
+        buildGooglePhotosJustifiedLayout(prevRectsMap);
+        return;
+      }
+
+      const totalTiles = masonryTileList.length;
+      const targetGroupSize = totalTiles <= 6 ? 3 : 4;
+      const numGroups = Math.max(1, Math.round(totalTiles / targetGroupSize));
+
+      masonryGroups = [];
+      let startIdx = 0;
+      for (let g = 0; g < numGroups; g++) {
+        const remainingTiles = totalTiles - startIdx;
+        const remainingGroups = numGroups - g;
+        const count = Math.max(1, Math.round(remainingTiles / remainingGroups));
+        const slice = masonryTileList.slice(startIdx, startIdx + count);
+        startIdx += count;
+
+        for (let i = 0; i < slice.length; i++) {
+          slice[i].groupIndex = g;
+        }
+
+        const prelimRoot = solveAspectLockedSubtree(slice, Math.round(sw / Math.sqrt(numGroups)), Math.round(sh / Math.sqrt(numGroups)), gap);
+        const groupAspect = prelimRoot ? prelimRoot.effAspect : 1.33;
+
+        masonryGroups.push({
+          index: g,
+          tiles: slice,
+          aspect: groupAspect,
+          sizeJitter: 0.94 + Math.random() * 0.12,
+          subtreeRoot: prelimRoot,
+          x: 0,
+          y: 0,
+          w: sw,
+          h: sh
+        });
+      }
+
+      // Solve top-level screen partition across the local groups
+      masonryTreeRoot = solveAspectLockedSubtree(masonryGroups, sw, sh, gap, null, true);
+      if (masonryTreeRoot && masonryTreeRoot._orderedItems) {
+        masonryGroups = masonryTreeRoot._orderedItems;
+      }
+      for (let g = 0; g < masonryGroups.length; g++) {
+        masonryGroups[g].index = g;
+        for (let i = 0; i < masonryGroups[g].tiles.length; i++) {
+          masonryGroups[g].tiles[i].groupIndex = g;
+        }
+      }
+
+      applySubtreeGeometry(masonryTreeRoot, 0, 0, sw, sh, gap, (group, gx, gy, gw, gh) => {
+        group.x = gx;
+        group.y = gy;
+        group.w = gw;
+        group.h = gh;
+        group.subtreeRoot = solveAspectLockedSubtree(group.tiles, gw, gh, gap, null, true);
+        if (group.subtreeRoot && group.subtreeRoot._orderedItems) {
+          group.tiles = group.subtreeRoot._orderedItems;
+        }
+        for (let i = 0; i < group.tiles.length; i++) {
+          group.tiles[i].groupIndex = group.index;
+        }
+        applySubtreeGeometry(group.subtreeRoot, gx, gy, gw, gh, gap, (tile, tx, ty, tw, th) => {
+          if (prevRectsMap) {
+            const old = prevRectsMap.get(tile.id);
+            applyTileTargetRectWithFlip(tile, tx, ty, tw, th, old, false);
+          } else {
+            commitTileGeometryImmediate(tile, tx, ty, tw, th);
+          }
+        });
+      });
+    }
+
+    function relayoutMasonryGrid() {
+      if (DISPLAY_MODE !== 'masonry' || masonryTileList.length === 0) return;
+      clearPreStagedMasonrySwitch(true);
+      syncStageRowsModeClass();
+      const sw = window.innerWidth;
+      const sh = window.innerHeight;
+      if (sw <= 0 || sh <= 0) return;
+
+      if (MASONRY_LAYOUT === 'rows') {
+        buildGooglePhotosJustifiedLayout(null);
+        return;
+      }
+
+      if (!masonryTreeRoot || masonryGroups.length === 0) {
+        rebuildFullMasonryLayout(false);
+        return;
+      }
+      const gap = Math.max(0, Math.min(10, Number(MASONRY_GAP) || 0));
+      applySubtreeGeometry(masonryTreeRoot, 0, 0, sw, sh, gap, (group, gx, gy, gw, gh) => {
+        group.x = gx;
+        group.y = gy;
+        group.w = gw;
+        group.h = gh;
+        const prevMask = (group.subtreeRoot && typeof group.subtreeRoot._winMask === 'number')
+          ? group.subtreeRoot._winMask
+          : null;
+        group.subtreeRoot = solveAspectLockedSubtree(group.tiles, gw, gh, gap, prevMask, false);
+        applySubtreeGeometry(group.subtreeRoot, gx, gy, gw, gh, gap, (tile, tx, ty, tw, th) => {
+          commitTileGeometryImmediate(tile, tx, ty, tw, th);
+        });
+      });
+    }
+
+    function switchMasonryLayoutEngine(rawNewLayout) {
+      const newLayout = normalizeMasonryLayout(rawNewLayout);
+      if (MASONRY_LAYOUT === newLayout) return;
+      MASONRY_LAYOUT = newLayout;
+      syncStageRowsModeClass();
+      if (DISPLAY_MODE === 'masonry' && masonryTileList.length > 0) {
+        cancelActiveMasonryFlipsAndPlans();
+        rebuildFullMasonryLayout(true);
+      }
+    }
+
+    function createMasonryTileDom(ready) {
+      const tileEl = document.createElement('div');
+      tileEl.className = 'masonry-tile';
+
+      const flipInner = document.createElement('div');
+      flipInner.className = 'masonry-flip-inner';
+
+      const media = ready.media;
+      media.className = 'masonry-media';
+      flipInner.appendChild(media);
+      tileEl.appendChild(flipInner);
+      stage.appendChild(tileEl);
+
+      applyTileAmbientBackdrop(flipInner, media, ready.isVideo, ready.ambientBgUrl);
+
+      if (ready.isVideo) {
+        enforceSilentVideo(media);
+        media.play().catch(() => {});
+      }
+
+      const tileObj = {
+        id: nextMasonryTileId++,
+        groupIndex: 0,
+        element: tileEl,
+        flipInner: flipInner,
+        mediaElement: media,
+        ambientBgUrl: ready.ambientBgUrl || '',
+        url: ready.url,
+        isVideo: ready.isVideo,
+        isAnimated: ready.isAnimated,
+        isGif: ready.isGif,
+        gifLoopDurationSec: ready.gifLoopDurationSec,
+        aspect: clampTileAspect(ready.aspect),
+        sizeJitter: 0.92 + Math.random() * 0.16,
+        x: 0,
+        y: 0,
+        w: 100,
+        h: 100,
+        liveElapsedSec: 0,
+        minPlayDurationSec: 0,
+        hasPlayedOnce: !ready.isAnimated,
+        isFlipping: false,
+        flipPhase: 0,
+        flipElapsed: 0,
+        pendingReady: null,
+        activePreStage: null,
+        isReflowing: false,
+        flipFromX: 0,
+        flipFromY: 0,
+        flipFromSX: 1,
+        flipFromSY: 1,
+        flipReflowElapsed: 0
+      };
+
+      attachPlaythroughTracker(tileObj);
+      return tileObj;
+    }
+
+    function populateMasonryIfNeeded() {
+      if (DISPLAY_MODE !== 'masonry' || APP_PAUSED || !SCREEN_ENABLED) return;
+      syncStageRowsModeClass();
+      const targetCount = Math.max(4, Math.min(36, Math.round(Number(MASONRY_TILES) || 12)));
+
+      let changedStructure = false;
+      if (masonryTileList.length !== targetCount) {
+        cancelActiveMasonryFlipsAndPlans();
+      }
+      while (masonryTileList.length > targetCount) {
+        const removed = masonryTileList.pop();
+        destroyItem(removed);
+        changedStructure = true;
+      }
+
+      while (masonryTileList.length < targetCount && readyImageQueue.length > 0) {
+        const ready = readyImageQueue.shift();
+        recordShownMedia(ready);
+        const tileObj = createMasonryTileDom(ready);
+        masonryTileList.push(tileObj);
+        changedStructure = true;
+      }
+
+      if (changedStructure && masonryTileList.length > 0) {
+        rebuildFullMasonryLayout(false);
+      }
+
+      if (masonryTileList.length < targetCount) {
+        pumpPreloader();
+      }
+    }
+
+    function isAnyMasonryTileBusy() {
+      for (let i = 0; i < masonryTileList.length; i++) {
+        if (masonryTileList[i].isFlipping || masonryTileList[i].isReflowing) {
+          return true;
+        }
+      }
+      return false;
+    }
+
+    function triggerNextMasonryFlip(forceIgnorePlayGuard = false) {
+      if (DISPLAY_MODE !== 'masonry' || masonryTileList.length === 0) {
+        pumpPreloader();
+        return false;
+      }
+
+      // High-stress protection: strictly allow at most 1 active flip/reflow at a time across the 36-tile grid
+      // so rapid Next clicks never launch overlapping 3D GPU layers or corrupt mid-animation FLIP rects
+      if (isAnyMasonryTileBusy()) {
+        return false;
+      }
+
+      // Fast path: If a background pre-staged switch is ready and valid, launch it with zero setup overhead
+      if (
+        preStagedMasonryPlan &&
+        preStagedMasonryPlan.tile &&
+        !preStagedMasonryPlan.tile.isFlipping &&
+        masonryTileList.includes(preStagedMasonryPlan.tile)
+      ) {
+        const plan = preStagedMasonryPlan;
+        preStagedMasonryPlan = null;
+        const chosenTile = plan.tile;
+        recordShownMedia(plan.ready);
+
+        if (chosenTile.element) {
+          chosenTile.element.classList.add('is-flipping');
+        }
+        chosenTile.isFlipping = true;
+        chosenTile.flipPhase = 1;
+        chosenTile.flipElapsed = 0;
+        chosenTile.activePreStage = plan;
+        chosenTile.pendingReady = null;
+        return true;
+      }
+
+      clearPreStagedMasonrySwitch(true);
+      if (readyImageQueue.length === 0) {
+        pumpPreloader();
+        return false;
+      }
+
+      const busyGroups = new Set();
+      for (let i = 0; i < masonryTileList.length; i++) {
+        if (masonryTileList[i].isFlipping || masonryTileList[i].isReflowing) {
+          busyGroups.add(masonryTileList[i].groupIndex);
+        }
+      }
+
+      let eligible = masonryTileList.filter(
+        t => !t.isFlipping && !busyGroups.has(t.groupIndex) && (forceIgnorePlayGuard || t.hasPlayedOnce)
+      );
+      if (eligible.length === 0) {
+        return false;
+      }
+
+      const chosenTile = eligible[Math.floor(Math.random() * eligible.length)];
+      const nextReady = readyImageQueue.shift();
+      recordShownMedia(nextReady);
+      pumpPreloader();
+
+      if (MASONRY_LAYOUT === 'mondrian' && !nextReady.ambientBgUrl && nextReady.media) {
+        nextReady.ambientBgUrl = computeAmbientBackdropDataUrl(nextReady.media);
+      }
+
+      const newAspect = clampTileAspect(nextReady.aspect);
+      const newSizeJitter = 0.92 + Math.random() * 0.16;
+      const stagedMediaEl = nextReady.media;
+      if (stagedMediaEl && chosenTile.flipInner) {
+        stagedMediaEl.className = 'masonry-media pre-staged-media';
+        chosenTile.flipInner.appendChild(stagedMediaEl);
+      }
+      const reflowPlan = precomputeGroupReflowPlan(chosenTile.groupIndex, chosenTile.id, newAspect, newSizeJitter);
+
+      if (chosenTile.element) {
+        chosenTile.element.classList.add('is-flipping');
+      }
+      chosenTile.isFlipping = true;
+      chosenTile.flipPhase = 1;
+      chosenTile.flipElapsed = 0;
+      chosenTile.activePreStage = {
+        tile: chosenTile,
+        ready: nextReady,
+        stagedMediaEl: stagedMediaEl,
+        newAspect: newAspect,
+        newSizeJitter: newSizeJitter,
+        reflowPlan: reflowPlan
+      };
+      chosenTile.pendingReady = null;
+      return true;
+    }
+
+    function updateMasonryMode(deltaTime) {
+      if (masonryTileList.length < MASONRY_TILES && readyImageQueue.length > 0) {
+        populateMasonryIfNeeded();
+      }
+
+      for (let i = 0; i < masonryTileList.length; i++) {
+        const tile = masonryTileList[i];
+        if (!tile.hasPlayedOnce) {
+          tile.liveElapsedSec += deltaTime;
+          if (tile.liveElapsedSec >= (tile.minPlayDurationSec || 2.5)) {
+            tile.hasPlayedOnce = true;
+          }
+        }
+
+        // Advance GPU FLIP neighbor reflow animation (translate3d + scale3d only, zero layout thrashing)
+        if (tile.isReflowing) {
+          tile.flipReflowElapsed += deltaTime;
+          const rp = Math.min(1.0, tile.flipReflowElapsed / MASONRY_REFLOW_DURATION_SEC);
+          if (rp >= 1.0) {
+            tile.isReflowing = false;
+            if (tile.element) {
+              tile.element.classList.remove('is-reflowing');
+              tile.element.style.transform = `translate3d(${tile.x}px, ${tile.y}px, 0)`;
+            }
+          } else {
+            const ease = 1 - Math.pow(1 - rp, 3);
+            const curX = tile.x + tile.flipFromX * (1 - ease);
+            const curY = tile.y + tile.flipFromY * (1 - ease);
+            const curSX = 1 + (tile.flipFromSX - 1) * (1 - ease);
+            const curSY = 1 + (tile.flipFromSY - 1) * (1 - ease);
+            if (tile.element) {
+              tile.element.style.transform = `translate3d(${curX.toFixed(1)}px, ${curY.toFixed(1)}px, 0) scale3d(${curSX.toFixed(4)}, ${curSY.toFixed(4)}, 1)`;
+            }
+          }
+        }
+
+        if (tile.isFlipping) {
+          tile.flipElapsed += deltaTime;
+          if (tile.flipPhase === 1) {
+            const p = Math.min(1.0, tile.flipElapsed / MASONRY_FLIP_HALF_SEC);
+            const deg = p * 90.0;
+            if (tile.flipInner) {
+              tile.flipInner.style.transform = `rotateY(${deg.toFixed(1)}deg)`;
+            }
+            if (p >= 1.0) {
+              // At 90 degrees (edge-on), activate the pre-rendered DOM back-layer and apply pre-organized rects
+              const preStage = tile.activePreStage;
+              tile.activePreStage = null;
+              if (preStage && preStage.ready && preStage.stagedMediaEl) {
+                const incoming = preStage.ready;
+                const newMedia = preStage.stagedMediaEl;
+
+                // Strictly destroy and detach the outgoing media node to prevent any memory bloat
+                if (tile.mediaElement && tile.mediaElement !== newMedia) {
+                  const oldMedia = tile.mediaElement;
+                  if (oldMedia.parentNode) {
+                    oldMedia.parentNode.removeChild(oldMedia);
+                  }
+                  cleanupMediaNode(oldMedia);
+                }
+
+                // Reveal the pre-rendered media node (already mounted in tile.flipInner)
+                newMedia.className = 'masonry-media';
+                if (!newMedia.parentNode && tile.flipInner) {
+                  tile.flipInner.appendChild(newMedia);
+                }
+
+                tile.ambientBgUrl = incoming.ambientBgUrl || '';
+                applyTileAmbientBackdrop(tile.flipInner, newMedia, incoming.isVideo, tile.ambientBgUrl);
+
+                if (incoming.isVideo) {
+                  enforceSilentVideo(newMedia);
+                  newMedia.play().catch(() => {});
+                }
+                tile.mediaElement = newMedia;
+                tile.url = incoming.url;
+                tile.isVideo = incoming.isVideo;
+                tile.isAnimated = incoming.isAnimated;
+                tile.isGif = incoming.isGif;
+                tile.gifLoopDurationSec = incoming.gifLoopDurationSec;
+                tile.aspect = preStage.newAspect;
+                tile.sizeJitter = preStage.newSizeJitter;
+                attachPlaythroughTracker(tile);
+
+                // Apply pre-organized row/group rects via GPU FLIP
+                reflowMasonryGroupWithFlip(tile.groupIndex, tile.id, preStage.reflowPlan);
+              }
+              tile.flipPhase = 2;
+              tile.flipElapsed = 0;
+              if (tile.flipInner) {
+                tile.flipInner.style.transform = 'rotateY(-90deg)';
+              }
+            }
+          } else if (tile.flipPhase === 2) {
+            const p = Math.min(1.0, tile.flipElapsed / MASONRY_FLIP_HALF_SEC);
+            const deg = -90.0 + p * 90.0;
+            if (tile.flipInner) {
+              tile.flipInner.style.transform = `rotateY(${deg.toFixed(1)}deg)`;
+            }
+            if (p >= 1.0) {
+              if (tile.flipInner) {
+                tile.flipInner.style.transform = '';
+              }
+              if (tile.element) {
+                tile.element.classList.remove('is-flipping');
+              }
+              tile.isFlipping = false;
+              tile.flipPhase = 0;
+              tile.flipElapsed = 0;
+            }
+          }
+        }
+      }
+
+      if (WALLPAPER_PAUSED) return;
+
+      masonrySwitchTimer += deltaTime;
+      const delayTarget = Math.max(1, Math.min(60, Number(MASONRY_DELAY) || 5));
+
+      // Pre-render & pre-organize the next media switch in the background before the flip timer fires
+      const preStageThreshold = Math.max(0.15, delayTarget - MASONRY_PRE_STAGE_LEAD_SEC);
+      if (!preStagedMasonryPlan && masonrySwitchTimer >= preStageThreshold && masonrySwitchTimer < delayTarget) {
+        preStageNextMasonrySwitch();
+      }
+
+      if (masonrySwitchTimer >= delayTarget) {
+        if (triggerNextMasonryFlip(false)) {
+          masonrySwitchTimer = 0;
+        } else {
+          masonrySwitchTimer = Math.max(0, delayTarget - 0.25);
+        }
+      }
+    }
+
+    // =========================================================================
     // MAIN ANIMATION LOOP & RESIZE HANDLING
     // =========================================================================
     window.addEventListener('resize', () => {
@@ -1519,13 +3262,15 @@
           advanceSlideshowIfReady();
         }
         pumpPreloader();
+      } else if (DISPLAY_MODE === 'masonry') {
+        relayoutMasonryGrid();
       } else {
-        resizeCollageCanvas(true);
+        resizePolaroidCanvas(true);
         coverageGrid.fill(0);
         coveredCellCount = 0;
         screenFullyCovered = false;
-        for (let i = 0; i < collageItems.length; i++) {
-          markCoverageForLandedItem(collageItems[i]);
+        for (let i = 0; i < polaroidItems.length; i++) {
+          markCoverageForLandedItem(polaroidItems[i]);
         }
       }
     });
@@ -1543,8 +3288,10 @@
           updateScrollMode(deltaTime);
         } else if (DISPLAY_MODE === 'slideshow') {
           updateSlideshowMode(deltaTime);
+        } else if (DISPLAY_MODE === 'masonry') {
+          updateMasonryMode(deltaTime);
         } else {
-          updateCollageMode(deltaTime);
+          updatePolaroidMode(deltaTime);
         }
       }
 
@@ -1552,7 +3299,7 @@
     }
 
     // =========================================================================
-    // EPOCH & PAUSE STATE POLLING
+    // EPOCH, PAUSE & NAVIGATION STATE POLLING
     // =========================================================================
     setInterval(async () => {
       try {
@@ -1561,6 +3308,39 @@
           const data = await res.json();
           if (typeof data.app_paused === 'boolean' || typeof data.wallpaper_paused === 'boolean') {
             window.applyPauseStates(data.app_paused, data.wallpaper_paused);
+          }
+
+          if (typeof data.nav_seq === 'number') {
+            if (lastNavSeq === null) {
+              lastNavSeq = data.nav_seq;
+            } else if (data.nav_seq > lastNavSeq) {
+              if (data.nav_action === 'prev') {
+                window.triggerPreviousMedia(data.nav_seq);
+              } else if (data.nav_action === 'next') {
+                window.triggerNextMedia(data.nav_seq);
+              } else {
+                lastNavSeq = data.nav_seq;
+              }
+            }
+          }
+
+          if (typeof data.prop_seq === 'number') {
+            if (lastPropSeq === null) {
+              lastPropSeq = data.prop_seq;
+            } else if (data.prop_seq > lastPropSeq) {
+              lastPropSeq = data.prop_seq;
+              const propRes = await fetch(`${LOCAL_ORIGIN}/properties?screen=${encodeURIComponent(SCREEN_ID)}`);
+              if (propRes.ok) {
+                const payload = await propRes.json();
+                if (typeof payload.enabled === 'boolean') {
+                  window.setScreenEnabled(payload.enabled);
+                }
+                const props = payload.properties || payload;
+                if (window.wallpaperPropertyListener && window.wallpaperPropertyListener.applyUserProperties) {
+                  window.wallpaperPropertyListener.applyUserProperties(props);
+                }
+              }
+            }
           }
 
           if (currentEpoch === null) {
@@ -1636,8 +3416,11 @@
                   if (it.mediaElement) {
                     readyImageQueue.unshift({
                       media: it.mediaElement,
+                      url: it.mediaElement.src || '',
                       isVideo: it.isVideo,
                       isAnimated: it.isAnimated,
+                      isGif: false,
+                      gifLoopDurationSec: 2.5,
                       aspect: it.aspect,
                       naturalW: 1,
                       naturalH: 1
@@ -1664,19 +3447,19 @@
           if (DISPLAY_MODE === 'scroll') relayoutScrollItems();
         }
         if (properties.dropspeed) {
-          COLLAGE_DROP_SPEED = Number(properties.dropspeed.value) || 1.0;
+          POLAROID_DROP_SPEED = Number(properties.dropspeed.value) || 1.0;
         }
         if (properties.minsize) {
-          COLLAGE_MIN_SIZE = Number(properties.minsize.value) || 220;
-          if (COLLAGE_MIN_SIZE > COLLAGE_MAX_SIZE) COLLAGE_MAX_SIZE = COLLAGE_MIN_SIZE;
+          POLAROID_MIN_SIZE = Number(properties.minsize.value) || 220;
+          if (POLAROID_MIN_SIZE > POLAROID_MAX_SIZE) POLAROID_MAX_SIZE = POLAROID_MIN_SIZE;
         }
         if (properties.maxsize) {
-          COLLAGE_MAX_SIZE = Number(properties.maxsize.value) || 440;
-          if (COLLAGE_MAX_SIZE < COLLAGE_MIN_SIZE) COLLAGE_MIN_SIZE = COLLAGE_MAX_SIZE;
+          POLAROID_MAX_SIZE = Number(properties.maxsize.value) || 440;
+          if (POLAROID_MAX_SIZE < POLAROID_MIN_SIZE) POLAROID_MIN_SIZE = POLAROID_MAX_SIZE;
         }
         if (properties.dropdelay !== undefined) {
           const rawDelay = Number(properties.dropdelay.value);
-          COLLAGE_DROP_DELAY = isNaN(rawDelay) ? 0 : Math.max(0, Math.min(600, rawDelay));
+          POLAROID_DROP_DELAY = isNaN(rawDelay) ? 0 : Math.max(0, Math.min(600, rawDelay));
         }
         if (properties.slideshowfade !== undefined && properties.slideshowfade !== null) {
           const rawFade = Number(properties.slideshowfade.value);
@@ -1686,6 +3469,33 @@
           const rawDur = Number(properties.slideshowduration.value);
           SLIDESHOW_DURATION = isNaN(rawDur) ? 10 : Math.max(0, Math.min(600, rawDur));
         }
+        if (properties.masonrylayout && properties.masonrylayout.value !== undefined) {
+          switchMasonryLayoutEngine(properties.masonrylayout.value);
+        }
+        if (properties.masonrytiles !== undefined && properties.masonrytiles !== null) {
+          const rawTiles = Math.round(Number(properties.masonrytiles.value));
+          const newTiles = isNaN(rawTiles) ? 12 : Math.max(4, Math.min(36, rawTiles));
+          if (MASONRY_TILES !== newTiles) {
+            MASONRY_TILES = newTiles;
+            if (DISPLAY_MODE === 'masonry') {
+              populateMasonryIfNeeded();
+            }
+          }
+        }
+        if (properties.masonrygap !== undefined && properties.masonrygap !== null) {
+          const rawGap = Math.round(Number(properties.masonrygap.value));
+          const newGap = isNaN(rawGap) ? 4 : Math.max(0, Math.min(10, rawGap));
+          if (MASONRY_GAP !== newGap) {
+            MASONRY_GAP = newGap;
+            if (DISPLAY_MODE === 'masonry') {
+              relayoutMasonryGrid();
+            }
+          }
+        }
+        if (properties.masonrydelay !== undefined && properties.masonrydelay !== null) {
+          const rawMDelay = Math.round(Number(properties.masonrydelay.value));
+          MASONRY_DELAY = isNaN(rawMDelay) ? 5 : Math.max(1, Math.min(60, rawMDelay));
+        }
         if (properties.displaymode && properties.displaymode.value) {
           switchDisplayMode(properties.displaymode.value);
         }
@@ -1693,7 +3503,7 @@
     };
 
     async function init() {
-      resizeCollageCanvas(false);
+      resizePolaroidCanvas(false);
       try {
         const propRes = await fetch(`${LOCAL_ORIGIN}/properties?screen=${encodeURIComponent(SCREEN_ID)}`);
         if (propRes.ok) {

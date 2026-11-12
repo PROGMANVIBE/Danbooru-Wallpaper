@@ -19,12 +19,16 @@
             "value": "scroll"
           },
           {
-            "label": "Polaroid Collage",
-            "value": "collage"
+            "label": "Polaroid",
+            "value": "polaroid"
           },
           {
             "label": "Fullscreen Slideshow",
             "value": "slideshow"
+          },
+          {
+            "label": "Masonry",
+            "value": "masonry"
           }
         ]
       },
@@ -77,7 +81,7 @@
         "editable": true
       },
       "dropspeed": {
-        "condition": "displaymode.value == 'collage'",
+        "condition": "displaymode.value == 'polaroid'",
         "order": 5,
         "text": "Drop Speed (0.2 – 4.0)",
         "type": "slider",
@@ -89,7 +93,7 @@
         "editable": true
       },
       "minsize": {
-        "condition": "displaymode.value == 'collage'",
+        "condition": "displaymode.value == 'polaroid'",
         "order": 6,
         "text": "Minimum Size (120 – 600 px)",
         "type": "slider",
@@ -100,7 +104,7 @@
         "editable": true
       },
       "maxsize": {
-        "condition": "displaymode.value == 'collage'",
+        "condition": "displaymode.value == 'polaroid'",
         "order": 7,
         "text": "Maximum Size (150 – 900 px)",
         "type": "slider",
@@ -111,7 +115,7 @@
         "editable": true
       },
       "dropdelay": {
-        "condition": "displaymode.value == 'collage'",
+        "condition": "displaymode.value == 'polaroid'",
         "order": 8,
         "text": "Spawn/Drop Delay (0 – 600 s)",
         "type": "slider",
@@ -143,11 +147,61 @@
         "step": 1,
         "value": 10,
         "editable": true
+      },
+      "masonrylayout": {
+        "condition": "displaymode.value == 'masonry'",
+        "order": 11,
+        "text": "Masonry Layout",
+        "type": "combo",
+        "value": "mondrian",
+        "options": [
+          {
+            "label": "Mondrian",
+            "value": "mondrian"
+          },
+          {
+            "label": "Rows",
+            "value": "rows"
+          }
+        ]
+      },
+      "masonrytiles": {
+        "condition": "displaymode.value == 'masonry'",
+        "order": 12,
+        "text": "Tile Count (4 – 36)",
+        "type": "slider",
+        "min": 4,
+        "max": 36,
+        "step": 1,
+        "value": 12,
+        "editable": true
+      },
+      "masonrygap": {
+        "condition": "displaymode.value == 'masonry'",
+        "order": 13,
+        "text": "Gap (0 – 10 px)",
+        "type": "slider",
+        "min": 0,
+        "max": 10,
+        "step": 1,
+        "value": 4,
+        "editable": true
+      },
+      "masonrydelay": {
+        "condition": "displaymode.value == 'masonry'",
+        "order": 14,
+        "text": "Delay (1 – 60 s)",
+        "type": "slider",
+        "min": 1,
+        "max": 60,
+        "step": 1,
+        "value": 5,
+        "editable": true
       }
     }
   },
   "screens": {},
-  "title": "Danbooru Infinite Scroll, Polaroid Collage & Fullscreen Slideshow",
+  "title": "Danbooru Infinite Scroll, Polaroid, Fullscreen Slideshow & Masonry",
   "type": "web",
   "version": 2
 }
