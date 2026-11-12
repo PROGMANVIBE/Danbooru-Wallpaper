@@ -127,8 +127,8 @@ const FEATURE_SUMMARY_ITEMS = [
     file: 'danbooru_service.py (AppResourceMonitor & ResourceGraphDialog)',
     issue: 'Windows Task Manager Performance-Style "Resource Graph" Pop-Out with True 0%–100% Total Physical RAM Scaling',
     cause:
-      'User requested a "Resource Graph" pop-out styled like Windows Task Manager Performance graphs, and reported that the Memory graph previously scaled against a 4096 MB dynamic ceiling—making 6.9% RAM usage (2215.2 MB of 32 GB) look like ~70% utilization.',
-    fix: 'Added the `📊 Resource Graph` button in `SettingsDialog` and updated `ResourceGraphDialog` so the Memory graph (in the left sidebar mini sparkline, single Memory view, and All Graphs 3x stacked view) plots `ram_pct_history` against `100.0` (0%–100% of total physical system memory) so 6.9% RAM usage renders at its true 6.9% vertical height.',
+      'User requested a "Resource Graph" pop-out styled like Windows Task Manager Performance graphs, and reported that the Memory graph previously scaled against a 4096 MB dynamic ceiling rather than total physical system RAM.',
+    fix: 'Added the `📊 Resource Graph` button in `SettingsDialog` and updated `ResourceGraphDialog` so the Memory graph (in the left sidebar mini sparkline, single Memory view, and All Graphs 3x stacked view) plots `ram_pct_history` against `100.0` (0%–100% of total physical system memory) so RAM utilization renders at its true proportional vertical height.',
   },
   {
     id: 'FEAT-04',

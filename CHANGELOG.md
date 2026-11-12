@@ -8,7 +8,7 @@
   - **Strict Single-Flip Concurrency & Reflow Guard (`isAnyMasonryTileBusy`)**: Enforced `if (isAnyMasonryTileBusy()) return false;` in `triggerNextMasonryFlip()` and removed the `busyGroups` bypass (`if (eligible.length === 0 && forceIgnorePlayGuard)`) so rapid manual `"Next"` triggers never launch overlapping 3D GPU layers or recalculate BSP/Row geometry from mid-animation rects.
   - **Steady-State Preload Cap & Serialized Scratch-Canvas Downscaling**: Capped `readyImageQueue` in Masonry mode to `10` items once all `MASONRY_TILES` (`36`) are populated on screen (instead of holding 42 extra decoded media nodes in RAM/VRAM), and serialized `downscaleScratchCanvas` with `isDownscaleCanvasBusy` while deferring canvas downscaling during active flips.
 - **Fixed Memory Resource Graph Scaling Against 100% Total Physical System RAM**:
-  - Updated `ResourceGraphDialog` in `danbooru_service.py` (left-sidebar Memory mini sparkline, single `Memory` graph view, and `All Graphs (3x)` stacked view) to plot `self.monitor.ram_pct_history` against a fixed `0% – 100%` scale of total physical system memory (`total_phys_mb`) rather than a dynamic `4096 MB` ceiling—so `6.9%` (`2215.2 MB` / `32 GB`) displays at its true `6.9%` height on the graph.
+  - Updated `ResourceGraphDialog` in `danbooru_service.py` (left-sidebar Memory mini sparkline, single `Memory` graph view, and `All Graphs (3x)` stacked view) to plot `self.monitor.ram_pct_history` against a fixed `0% – 100%` scale of total physical system memory (`total_phys_mb`) rather than a dynamic `4096 MB` ceiling—so actual system memory percentage displays at its true proportional height on the graph.
 
 ---
 
