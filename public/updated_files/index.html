@@ -196,9 +196,9 @@
     const SCREEN_ID = urlParams.get('screen') || 'screen_1';
 
     // --- Configurable Defaults (Overridden by Settings / project.json) ---
-    let SCREEN_ENABLED = true;
+    let SCREEN_ENABLED = false;       // Strictly false until confirmed enabled by /properties or setScreenEnabled(true)
     let APP_PAUSED = false;           // Master application pause (freezes everything)
-    let WALLPAPER_PAUSED = false;     // Search bar pause (pauses motion/transitions, keeps GIF/MP4 playing)
+    let WALLPAPER_PAUSED = false;     // Per-screen Display tab pause (pauses motion/transitions, keeps GIF/MP4 playing)
 
     let DISPLAY_MODE = 'scroll';      // 'scroll' | 'polaroid' | 'slideshow' | 'masonry'
     let SCROLL_DIRECTION = 'left';    // 'left' | 'right' | 'up' | 'down'
@@ -354,11 +354,14 @@
       return '';
     }
 
-    // Record a shown item into history so the Search Bar "Previous" button can requeue it
+    // Record a shown item into history so the Display Tab "Previous" button can requeue it,
+    // and notify the local Python service so the permanent 4-row Media Tags box shows its tags.
     function recordShownMedia(readyItem) {
       if (!readyItem || !readyItem.url) return;
+      const postId = Number(readyItem.postId) || 0;
       const snapshot = {
         url: readyItem.url,
+        postId: postId,
         isVideo: Boolean(readyItem.isVideo),
         isAnimated: Boolean(readyItem.isAnimated),
         isGif: Boolean(readyItem.isGif),
@@ -374,6 +377,12 @@
         }
       }
       currentDisplayedDesc = snapshot;
+
+      if (postId > 0) {
+        fetch(
+          `${LOCAL_ORIGIN}/report_shown?screen=${encodeURIComponent(SCREEN_ID)}&post_id=${encodeURIComponent(postId)}`
+        ).catch(() => {});
+      }
     }
 
     function enforceSilentVideo(video) {
@@ -765,6 +774,7 @@
           onComplete({
             media: video,
             url: desc.url,
+            postId: Number(desc.postId) || 0,
             isVideo: true,
             isAnimated: true,
             isGif: false,
@@ -788,6 +798,7 @@
           onComplete({
             media: img,
             url: desc.url,
+            postId: Number(desc.postId) || 0,
             isVideo: false,
             isAnimated: Boolean(desc.isAnimated),
             isGif: Boolean(desc.isGif),
@@ -910,7 +921,7 @@
       }
     }
 
-    function finalizePreloadedMedia(mediaEl, localMediaUrl, gen, isVideo, isAnimated, isGif, gifLoopDurationSec) {
+    function finalizePreloadedMedia(mediaEl, localMediaUrl, gen, isVideo, isAnimated, isGif, gifLoopDurationSec, postId = 0) {
       if (!inFlightMedia.has(mediaEl)) return;
       inFlightMedia.delete(mediaEl);
       activePreloadCount = Math.max(0, activePreloadCount - 1);
@@ -940,6 +951,7 @@
       readyImageQueue.push({
         media: mediaEl,
         url: localMediaUrl,
+        postId: Number(postId) || 0,
         isVideo: isVideo,
         isAnimated: isAnimated,
         isGif: Boolean(isGif),
@@ -1012,6 +1024,7 @@
         const localMediaUrl = buildLocalMediaUrl(post);
         if (!localMediaUrl) continue;
 
+        const postId = Number(post.id || 0);
         const ext = String(post.file_ext || '').toLowerCase();
         const isVideo = (ext === 'mp4') || localMediaUrl.toLowerCase().includes('ext=mp4');
         const isGif = !isVideo && ((ext === 'gif') || localMediaUrl.toLowerCase().includes('ext=gif'));
@@ -1035,7 +1048,7 @@
             video.oncanplay = null;
             video.onerror = null;
             const durSec = (Number.isFinite(video.duration) && video.duration > 0) ? video.duration : 3.0;
-            finalizePreloadedMedia(video, localMediaUrl, gen, true, true, false, durSec);
+            finalizePreloadedMedia(video, localMediaUrl, gen, true, true, false, durSec, postId);
           };
 
           video.onloadeddata = onReady;
@@ -1067,14 +1080,14 @@
               const blobUrl = URL.createObjectURL(new Blob([buf], { type: 'image/gif' }));
               img.dataset.blobUrl = blobUrl;
               img.onload = () => {
-                finalizePreloadedMedia(img, localMediaUrl, gen, false, true, true, loopSec);
+                finalizePreloadedMedia(img, localMediaUrl, gen, false, true, true, loopSec, postId);
               };
               img.onerror = () => handleMediaLoadFailure(img);
               img.src = blobUrl;
             })
             .catch(() => {
               img.onload = () => {
-                finalizePreloadedMedia(img, localMediaUrl, gen, false, true, true, 2.5);
+                finalizePreloadedMedia(img, localMediaUrl, gen, false, true, true, 2.5, postId);
               };
               img.onerror = () => handleMediaLoadFailure(img);
               img.src = localMediaUrl;
@@ -1110,7 +1123,7 @@
                   downscaleScratchCanvas.height = 1;
                   isDownscaleCanvasBusy = false;
                   if (!blob || !inFlightMedia.has(img)) {
-                    finalizePreloadedMedia(img, localMediaUrl, gen, false, false, false, 0);
+                    finalizePreloadedMedia(img, localMediaUrl, gen, false, false, false, 0, postId);
                     return;
                   }
                   const blobUrl = URL.createObjectURL(blob);
@@ -1123,10 +1136,10 @@
                   scaledImg.onload = () => {
                     if (typeof scaledImg.decode === 'function') {
                       scaledImg.decode()
-                        .then(() => finalizePreloadedMedia(scaledImg, localMediaUrl, gen, false, false, false, 0))
-                        .catch(() => finalizePreloadedMedia(scaledImg, localMediaUrl, gen, false, false, false, 0));
+                        .then(() => finalizePreloadedMedia(scaledImg, localMediaUrl, gen, false, false, false, 0, postId))
+                        .catch(() => finalizePreloadedMedia(scaledImg, localMediaUrl, gen, false, false, false, 0, postId));
                     } else {
-                      finalizePreloadedMedia(scaledImg, localMediaUrl, gen, false, false, false, 0);
+                      finalizePreloadedMedia(scaledImg, localMediaUrl, gen, false, false, false, 0, postId);
                     }
                   };
                   scaledImg.onerror = () => handleMediaLoadFailure(scaledImg);
@@ -1142,10 +1155,10 @@
 
             if (typeof img.decode === 'function') {
               img.decode()
-                .then(() => finalizePreloadedMedia(img, localMediaUrl, gen, false, false, false, 0))
-                .catch(() => finalizePreloadedMedia(img, localMediaUrl, gen, false, false, false, 0));
+                .then(() => finalizePreloadedMedia(img, localMediaUrl, gen, false, false, false, 0, postId))
+                .catch(() => finalizePreloadedMedia(img, localMediaUrl, gen, false, false, false, 0, postId));
             } else {
-              finalizePreloadedMedia(img, localMediaUrl, gen, false, false, false, 0);
+              finalizePreloadedMedia(img, localMediaUrl, gen, false, false, false, 0, postId);
             }
           };
 
@@ -3306,6 +3319,10 @@
         const res = await fetch(`${LOCAL_ORIGIN}/epoch?screen=${encodeURIComponent(SCREEN_ID)}`);
         if (res.ok) {
           const data = await res.json();
+          if (typeof data.enabled === 'boolean') {
+            window.setScreenEnabled(data.enabled);
+          }
+
           if (typeof data.app_paused === 'boolean' || typeof data.wallpaper_paused === 'boolean') {
             window.applyPauseStates(data.app_paused, data.wallpaper_paused);
           }

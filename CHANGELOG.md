@@ -1,4 +1,35 @@
-# Changelog — v2.2.1 (High-Stress 36-Tile Masonry Protection, 1.0s Next Cooldown & Total System RAM Graph Scaling)
+# Changelog — v2.3.0 (Display Tab Per-Screen Search, Shared Tag-Pool Deduplication, Danbooru Tag Category Colors, 4-Layer Media Tags Box & Direct Tray Click)
+
+## 🎯 v2.3.0 Per-Screen Display Search & Danbooru Category Color Updates
+
+- **Removed Standalone Floating Search Bar (`FloatingSearchBar`) & Integrated All Search Controls into the `Display` Tab**:
+  - Removed the separate floating desktop search window (`FloatingSearchBar`) and the obsolete `"Search Bar Position: Locked/Unlocked"` setting on the Credentials tab.
+  - Placed all search and playback features directly inside the **Display** tab of the Application Settings window (`SettingsDialog`), immediately below the **`Select Screen`** dropdown and the **`Display wallpaper on this screen`** checkbox, with no minimize button.
+- **Per-Screen Playback & Refresh Controls Above the `TAGS` Search Bar**:
+  - Positioned the per-screen status indicator badge (`● Ready`, `✔ P:X (Y pooled)`, `⏸ Screen Paused`, `○ Screen Disabled (No Fetch)`, `✖ API Error`) on the left and the **Refresh (`⟳`)**, **Previous (`◀`)**, **Next (`▶`)**, and **Pause (`PAUSE`)** buttons on the right **above** the new `TAGS =` search bar and **below** the `Select Screen` dropdown and display checkbox.
+  - All four buttons (**Refresh `⟳`**, **Previous `◀`**, **Next `▶`**, and **Pause `PAUSE`**) operate independently on **only the currently selected screen** in the `Select Screen` dropdown.
+- **Independent Per-Screen `TAGS` Search & Strict No-Fetch Guard for Unchecked Screens**:
+  - Added `"searchtags"` (`order: 0`, default `"scenery no_humans"`) to each screen's properties in `project.json` and `danbooru_service.py`.
+  - If a screen's **`Display wallpaper on this screen`** checkbox is unchecked (`enabled == False`), both `danbooru_service.py` (`/api`, `fill_tag_pool`, `ensure_screen_tag_pool_populated_async`) and `index.html` (`SCREEN_ENABLED = false` default startup state until `/properties` confirms `enabled: true`) strictly skip all media fetching and preloading for that screen.
+- **Shared Tag-Pool Deduplication Across Screens (`TAG_POOLS`)**:
+  - Implemented `TAG_POOLS` keyed by `canonical_pool_key(tags)`. When multiple enabled screens use the same `TAGS` query, they share a single upstream Danbooru API fetch pool (`TAG_POOLS[pool_key]`) while maintaining independent per-screen `seen_ids` cursors—eliminating duplicate HTTP requests to `danbooru.donmai.us` for identical tag searches.
+- **Below-Input Auto-Suggestion & Saved Searches Dropdowns**:
+  - Configured both the live tag auto-suggestion popup (`self.suggest_dropdown`) and the saved searches popup (`self.saved_dropdown`, `▼` button) to always populate **below** the `TAGS` search box (`ry = self.search_container.winfo_rooty() + self.search_container.winfo_height() + 2`).
+- **Permanent 4-Layer Scrollable Displayed Media Tags Box**:
+  - Placed a permanent full-width sub-panel box (`self.media_tags_box_frame` with `self.media_tags_text`, `height=4`, `wrap="word"`, and vertical `ttk.Scrollbar`) directly below the `TAGS` search box.
+  - Displays all tags of the **most recently displayed media** on the currently selected screen (reported in real time by `index.html` via `GET /report_shown?screen=<id>&post_id=<post_id>` when a media element becomes visible on screen).
+  - Clicking any tag in the permanent 4-layer box immediately appends that tag to the selected screen's `TAGS` search bar and applies the updated search.
+- **Authentic Danbooru Category Color Coordination Across All 3 Tag Locations**:
+  - All tags in the **`TAGS` search box**, the **auto-suggestion dropdown**, and the **permanent 4-layer displayed media tags box** are color-coordinated by their official Danbooru tag category (`DANBOORU_TAG_COLORS`, with light and dark theme palettes):
+    - **General (`category 0`)**: Blue (`#0075f8` Light / `#009be6` Dark)
+    - **Artist (`category 1`)**: Red (`#c00004` Light / `#ff8a8b` Dark)
+    - **Copyright (`category 3`)**: Purple (`#a800aa` Light / `#c797ff` Dark)
+    - **Character (`category 4`)**: Green (`#00ab2c` Light / `#35c64a` Dark)
+    - **Meta (`category 5`)**: Orange (`#fd9200` Light / `#ead084` Dark)
+- **Instant System Tray Left-Click to Open Settings**:
+  - Updated `setup_tray()` in `danbooru_service.py` so `pystray.MenuItem("Settings", on_tray_settings, default=True)` is the default primary action: **left-clicking** the Danbooru Wallpaper system tray icon immediately opens (or brings to front) the Application Settings window, while **right-clicking** opens the context menu with `Settings` and `Exit`.
+
+---
 
 ## 🛡️ v2.2.1 High-Stress Stability & Resource Graph Accuracy Updates
 

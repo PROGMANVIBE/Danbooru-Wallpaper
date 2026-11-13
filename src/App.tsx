@@ -16,43 +16,200 @@ import {
   Wrench,
   AlertTriangle,
   LayoutGrid,
+  Monitor,
+  RotateCw,
+  Play,
+  Pause,
+  ChevronLeft,
+  ChevronRight,
+  ChevronDown,
 } from 'lucide-react';
 
 type FileKey = 'CHANGELOG.md' | 'README.md' | 'danbooru_service.py' | 'index.html' | 'project.json';
-type ViewTab = 'code' | 'audit' | 'build';
+type ViewTab = 'code' | 'preview' | 'audit' | 'build';
 
 const FILE_LIST: { key: FileKey; path: string; label: string; desc: string }[] = [
-  {
-    key: 'CHANGELOG.md',
-    path: '/updated_files/CHANGELOG.md',
-    label: 'CHANGELOG.md',
-    desc: 'v2.2.0 release notes covering the Mondrian vs. Rows toggle, removal of blurred sections in Rows mode, layout toggle freeze fix, background pre-rendering/pre-organization of the next Masonry switch, and the Windows Task Manager Resource Graph pop-out.',
-  },
-  {
-    key: 'README.md',
-    path: '/updated_files/README.md',
-    label: 'README.md',
-    desc: 'Comprehensive documentation covering the 4 display modes (Scroll, Polaroid, Slideshow, Masonry with Mondrian ⇄ Rows), the Task Manager Resource Graph pop-out, Previous (◀) & Next (▶) search bar buttons, and anti-malware /media proxy.',
-  },
   {
     key: 'danbooru_service.py',
     path: '/updated_files/danbooru_service.py',
     label: 'danbooru_service.py',
-    desc: 'Updated service with the top-bar "📊 Resource Graph" Task Manager Performance pop-out (CPU, RAM, GPU telemetry across Python + WebView2), "Mondrian ⇄" / "Rows ⇄" toggle button, and single-flight async property synchronization eliminating cross-thread GUI freezes.',
+    desc: 'v2.3.0 service with standalone search window removed, per-screen Display tab controls (⟳, ◀, ▶, PAUSE above TAGS), shared TAG_POOLS deduplication, Danbooru category color coordination, 4-layer Displayed Media Tags box, and left-click tray Settings launch.',
   },
   {
     key: 'index.html',
     path: '/updated_files/index.html',
     label: 'index.html',
-    desc: 'WebView2 frontend featuring Mondrian vs. Rows (with all blurred sections removed in Rows mode), background pre-rendering & pre-organization of the next media switch 1.2s before flip initiation, 1280px bounded texture downscaling with zero memory bloat, and group re-indexing.',
+    desc: 'v2.3.0 WebView2 frontend with strict unchecked-screen no-fetch guard (SCREEN_ENABLED = false until confirmed), post_id tracking across preloader & DOM nodes, and real-time /report_shown reporting of displayed media to populate the 4-layer tags box.',
   },
   {
     key: 'project.json',
     path: '/updated_files/project.json',
     label: 'project.json',
-    desc: 'Wallpaper configuration schema updated with Masonry Layout options relabeled to "Mondrian" (mondrian) and "Rows" (rows), plus Tile Count (4–36), Gap (0–10 px), and Delay (1–60 s).',
+    desc: 'v2.3.0 wallpaper configuration schema updated with per-screen "searchtags" property (order: 0, default "scenery no_humans") alongside Display Mode, Scroll, Polaroid, Slideshow, and Masonry settings.',
+  },
+  {
+    key: 'CHANGELOG.md',
+    path: '/updated_files/CHANGELOG.md',
+    label: 'CHANGELOG.md',
+    desc: 'v2.3.0 release notes covering Display Tab Per-Screen Search integration, shared tag-pool deduplication, Danbooru category color coordination, the permanent 4-layer Displayed Media Tags box, and instant left-click tray Settings access.',
+  },
+  {
+    key: 'README.md',
+    path: '/updated_files/README.md',
+    label: 'README.md',
+    desc: 'Updated user & developer documentation detailing per-screen TAGS search in the Display tab, Danbooru category color codes, the 4-layer media tags box, and PyInstaller build instructions.',
   },
 ];
+
+type TagCategory = 0 | 1 | 3 | 4 | 5;
+
+const DANBOORU_CAT_META: Record<
+  TagCategory,
+  { name: string; lightHex: string; darkHex: string }
+> = {
+  0: { name: 'General', lightHex: '#0075f8', darkHex: '#009be6' },
+  1: { name: 'Artist', lightHex: '#c00004', darkHex: '#ff8a8b' },
+  3: { name: 'Copyright', lightHex: '#a800aa', darkHex: '#c797ff' },
+  4: { name: 'Character', lightHex: '#00ab2c', darkHex: '#35c64a' },
+  5: { name: 'Meta', lightHex: '#fd9200', darkHex: '#ead084' },
+};
+
+const KNOWN_TAG_CATEGORIES: Record<string, TagCategory> = {
+  scenery: 0,
+  no_humans: 0,
+  outdoors: 0,
+  sky: 0,
+  cloud: 0,
+  day: 0,
+  water: 0,
+  tree: 0,
+  blue_sky: 0,
+  sunlight: 0,
+  starry_sky: 0,
+  night: 0,
+  mountain: 0,
+  horizon: 0,
+  reflection: 0,
+  grass: 0,
+  flower: 0,
+  building: 0,
+  cityscape: 0,
+  sunset: 0,
+  ocean: 0,
+  '1girl': 0,
+  solo: 0,
+  'machi_(7769)': 1,
+  kantoku: 1,
+  wlop: 1,
+  makoto_shinkai: 1,
+  mochizuki_kei: 1,
+  original: 3,
+  genshin_impact: 3,
+  touhou: 3,
+  fate_grand_order: 3,
+  blue_archive: 3,
+  hatsune_miku: 4,
+  hakurei_reimu: 4,
+  'furina_(genshin_impact)': 4,
+  artoria_pendragon: 4,
+  highres: 5,
+  absurdres: 5,
+  animated: 5,
+  video: 5,
+  wallpaper: 5,
+  'rating:general': 5,
+  'order:random': 5,
+};
+
+const SAMPLE_SUGGESTIONS: { name: string; count: number; cat: TagCategory }[] = [
+  { name: 'scenery', count: 1482910, cat: 0 },
+  { name: 'no_humans', count: 312450, cat: 0 },
+  { name: 'makoto_shinkai', count: 4820, cat: 1 },
+  { name: 'genshin_impact', count: 642100, cat: 3 },
+  { name: 'furina_(genshin_impact)', count: 41200, cat: 4 },
+  { name: 'hatsune_miku', count: 298400, cat: 4 },
+  { name: 'highres', count: 4812000, cat: 5 },
+  { name: 'absurdres', count: 1920400, cat: 5 },
+  { name: 'starry_sky', count: 184320, cat: 0 },
+  { name: 'original', count: 3120900, cat: 3 },
+];
+
+const SAMPLE_MEDIA_POSTS: Record<
+  string,
+  { postId: number; tags: { name: string; cat: TagCategory }[] }[]
+> = {
+  screen_1: [
+    {
+      postId: 8492014,
+      tags: [
+        { name: 'machi_(7769)', cat: 1 },
+        { name: 'original', cat: 3 },
+        { name: 'highres', cat: 5 },
+        { name: 'absurdres', cat: 5 },
+        { name: 'wallpaper', cat: 5 },
+        { name: 'scenery', cat: 0 },
+        { name: 'no_humans', cat: 0 },
+        { name: 'outdoors', cat: 0 },
+        { name: 'sky', cat: 0 },
+        { name: 'cloud', cat: 0 },
+        { name: 'day', cat: 0 },
+        { name: 'blue_sky', cat: 0 },
+        { name: 'water', cat: 0 },
+        { name: 'reflection', cat: 0 },
+        { name: 'horizon', cat: 0 },
+        { name: 'sunlight', cat: 0 },
+        { name: 'mountain', cat: 0 },
+        { name: 'tree', cat: 0 },
+        { name: 'grass', cat: 0 },
+        { name: 'flower', cat: 0 },
+        { name: 'building', cat: 0 },
+        { name: 'cityscape', cat: 0 },
+        { name: 'ocean', cat: 0 },
+        { name: 'sunset', cat: 0 },
+      ],
+    },
+    {
+      postId: 8491882,
+      tags: [
+        { name: 'makoto_shinkai', cat: 1 },
+        { name: 'original', cat: 3 },
+        { name: 'highres', cat: 5 },
+        { name: 'absurdres', cat: 5 },
+        { name: 'scenery', cat: 0 },
+        { name: 'no_humans', cat: 0 },
+        { name: 'starry_sky', cat: 0 },
+        { name: 'night', cat: 0 },
+        { name: 'cloud', cat: 0 },
+        { name: 'mountain', cat: 0 },
+        { name: 'reflection', cat: 0 },
+        { name: 'water', cat: 0 },
+        { name: 'outdoors', cat: 0 },
+        { name: 'horizon', cat: 0 },
+      ],
+    },
+  ],
+  screen_2: [
+    {
+      postId: 8501290,
+      tags: [
+        { name: 'wlop', cat: 1 },
+        { name: 'genshin_impact', cat: 3 },
+        { name: 'furina_(genshin_impact)', cat: 4 },
+        { name: 'highres', cat: 5 },
+        { name: 'wallpaper', cat: 5 },
+        { name: '1girl', cat: 0 },
+        { name: 'solo', cat: 0 },
+        { name: 'water', cat: 0 },
+        { name: 'blue_sky', cat: 0 },
+        { name: 'sunlight', cat: 0 },
+        { name: 'outdoors', cat: 0 },
+        { name: 'reflection', cat: 0 },
+        { name: 'flower', cat: 0 },
+        { name: 'cloud', cat: 0 },
+      ],
+    },
+  ],
+};
 
 const SECURITY_AUDIT_ITEMS = [
   {
@@ -104,40 +261,40 @@ const SECURITY_AUDIT_ITEMS = [
 
 const FEATURE_SUMMARY_ITEMS = [
   {
-    id: 'FEAT-01',
-    severity: 'CRITICAL BUG FIX (Fatal Freeze on >3 Layout Toggles)',
+    id: 'REQ-01..03',
+    severity: 'v2.3.0 UI ARCHITECTURE',
+    file: 'danbooru_service.py (SettingsDialog._build_display_tab)',
+    issue: 'Removed Separate Search Window & Embedded Per-Screen Playback + TAGS Controls in Display Tab',
+    cause:
+      'User requested removing the standalone floating search window (`FloatingSearchBar`) and placing its features into the Display tab under the "Select Screen" dropdown and the "Display wallpaper on this screen" checkbox without a minimize button, with Refresh (⟳), Previous (◀), Next (▶), and Pause (PAUSE) placed above the new TAGS search bar.',
+    fix: 'Removed `FloatingSearchBar` and the Credentials tab lock toggle. Built `self.search_subpanel` in `SettingsDialog._build_display_tab()` directly below `screen_row` and `enable_row` (no minimize button). Placed `self.search_controls_row` (status badge + `⟳`, `◀`, `▶`, `PAUSE` wired strictly to the currently selected screen) directly above `self.tag_search_row` (`TAGS =`).',
+  },
+  {
+    id: 'REQ-04..05',
+    severity: 'v2.3.0 MULTI-SCREEN & DEDUPLICATION',
+    file: 'danbooru_service.py, index.html, project.json',
+    issue: 'Independent Per-Screen TAGS Search, No-Fetch Guard for Unchecked Screens & Shared Tag-Pool Reuse',
+    cause:
+      'User requested independent TAGS searches per displaying screen, skipping all media fetching if a screen is not checked to display, and reusing the same fetched media data when multiple screens share identical TAGS.',
+    fix: 'Added per-screen `"searchtags"` in `project.json` and `danbooru_service.py`. Implemented `TAG_POOLS[canonical_pool_key(tags)]` so multiple screens using the same tags pull from a single shared upstream fetch buffer while tracking independent per-screen `seen_ids` cursors. Enforced `if not sc_cfg.get("enabled", True): return []` in `/api`, `fill_tag_pool`, and `ensure_screen_tag_pool_populated_async`, and initialized `SCREEN_ENABLED = false` in `index.html` until `/properties` confirms the screen is enabled.',
+  },
+  {
+    id: 'REQ-06..08',
+    severity: 'v2.3.0 DANBOORU TAG COLORS & 4-LAYER BOX',
     file: 'danbooru_service.py & index.html',
-    issue: 'Cross-Thread Win32 & WebView2 IPC Deadlock When Toggling Between Mondrian and Rows (>3 Times)',
+    issue: 'Below-Input Auto-Suggestions, Permanent 4-Layer Scrollable Displayed Media Tags Box & Danbooru Category Colors',
     cause:
-      'Clicking the Masonry layout toggle button called `push_properties_to_webview(sid)` synchronously on the Tkinter UI thread, which ran blocking Win32 `SetWindowPos(..., SWP_FRAMECHANGED)`, `SendMessageW(WM_SIZE)`, and `RedrawWindow(..., RDW_UPDATENOW)` calls on the WebView2 HWND followed by a synchronous `win.evaluate_js(...)` semaphore wait and a redundant `window.dispatchEvent(new Event(\'resize\'))`. Rapidly toggling >3 times deadlocked the Tkinter GUI thread against the WebView2 WinForms UI thread with zero Python exceptions or log messages. In addition, `solveAspectLockedSubtree()` in `index.html` reordered `masonryGroups` when `numGroups >= 3` without re-indexing `group.index` and `tile.groupIndex`.',
-    fix: 'Replaced synchronous property pushes with a coalesced single-flight background worker (`_property_push_worker`), restricted Win32 geometry sync strictly to screen `enabled` state changes with `SWP_ASYNCWINDOWPOS = 0x4000`, added `prop_seq` in `/epoch` as a lock-free poll fallback, removed the redundant `resize` dispatch, and re-indexed `masonryGroups` after BSP solving.',
+      'User requested auto-suggestions to populate below the TAGS search box, a permanent 4-layer scrollable box below the TAGS search box showing all tags of the selected screen\'s most recently displayed media (with click-to-append), and Danbooru category color coordination across all 3 locations.',
+    fix: 'Positioned `self.suggest_dropdown` and `self.saved_dropdown` strictly below `self.search_container` (`ry = rooty + height + 2`). Added `self.media_tags_text` (`height=4, wrap="word"` + vertical `ttk.Scrollbar`) populated via `GET /report_shown?screen=<id>&post_id=<id>` from `index.html`. Configured `DANBOORU_TAG_COLORS` (0=General Blue, 1=Artist Red, 3=Copyright Purple, 4=Character Green, 5=Meta Orange) across `self.tag_input`, `self.suggest_labels`, and `self.media_tags_text`.',
   },
   {
-    id: 'FEAT-02',
-    severity: 'PERFORMANCE & VISUAL UPDATE',
-    file: 'index.html, danbooru_service.py, project.json',
-    issue: 'Removed Blurred Sections in Rows Mode, Relabeled Mondrian vs. Rows & Pre-Staged Next Masonry Switch Without Memory Bloat',
+    id: 'REQ-09',
+    severity: 'v2.3.0 SYSTEM TRAY UX',
+    file: 'danbooru_service.py (setup_tray)',
+    issue: 'Direct System Tray Click to Immediately Open Settings Window',
     cause:
-      'User requested removing the blurred/ambient sections when the Google Photos (Rows) option is selected, relabeling the toggle button and config to "Mondrian" vs. "Rows", and implementing background pre-rendering/pre-organization of the next media switch while preventing continuous memory bloat.',
-    fix: 'Added `#stage.rows-mode` CSS and JS guards so `Rows` mode removes all ambient/blurred backgrounds (`background-image: none`) and fills each justified row tile (`object-fit: cover`). Relabeled the toggle button and schema to `Mondrian` (`mondrian`) vs. `Rows` (`rows`). Implemented `preStageNextMasonrySwitch()` + `precomputeGroupReflowPlan()` 1.2s prior to flip initiation to pre-decode the next media node in a single hidden `.masonry-prestage-slot` and pre-calculate all FLIP matrices ahead of time, paired with 1280px static image downscaling on a reusable 1×1-reset canvas and immediate Blob URL revocation.',
-  },
-  {
-    id: 'FEAT-03',
-    severity: 'NEW TELEMETRY POP-OUT & 100% SYSTEM RAM SCALING',
-    file: 'danbooru_service.py (AppResourceMonitor & ResourceGraphDialog)',
-    issue: 'Windows Task Manager Performance-Style "Resource Graph" Pop-Out with True 0%–100% Total Physical RAM Scaling',
-    cause:
-      'User requested a "Resource Graph" pop-out styled like Windows Task Manager Performance graphs, and reported that the Memory graph previously scaled against a 4096 MB dynamic ceiling rather than total physical system RAM.',
-    fix: 'Added the `📊 Resource Graph` button in `SettingsDialog` and updated `ResourceGraphDialog` so the Memory graph (in the left sidebar mini sparkline, single Memory view, and All Graphs 3x stacked view) plots `ram_pct_history` against `100.0` (0%–100% of total physical system memory) so RAM utilization renders at its true proportional vertical height.',
-  },
-  {
-    id: 'FEAT-04',
-    severity: 'HIGH-STRESS STABILITY FIX (36-Tile Masonry Rapid Next Clicks)',
-    file: 'danbooru_service.py & index.html',
-    issue: 'Prevent Application Freeze & ~50% GPU Spike When Rapidly Clicking "Next" in 36-Tile Masonry Mode',
-    cause:
-      'Pressing "Next" (~6 times/sec) with 36 Masonry tiles spawned dozens of concurrent `_async_evaluate_js` threads in Python and bypassed `busyGroups` in `triggerNextMasonryFlip(true)`, launching overlapping 3D GPU card flips, mid-reflow geometry recalculations, and concurrent scratch-canvas downscales.',
-    fix: 'Implemented a 1.0-second internal cooldown (`NAV_BUTTON_COOLDOWN_SEC = 1.0` in Python with button visual state + `MANUAL_NAV_COOLDOWN_MS = 1000` in JS), replaced per-call thread spawning in `_async_evaluate_js` with a single-flight queue worker (`_js_eval_worker`), added `isAnyMasonryTileBusy()` so strictly 1 tile flips/reflows at a time, serialized `downscaleScratchCanvas`, and capped steady-state `readyImageQueue` to 10 items once all 36 tiles are populated.',
+      'User requested that the Danbooru Wallpaper system tray icon no longer require a right-click menu selection to open Settings—left-click opens Settings immediately and right-click shows the Exit menu.',
+    fix: 'Updated `setup_tray()` with `pystray.MenuItem("Settings", on_tray_settings, default=True)` so left-clicking the tray icon invokes `on_tray_settings` immediately, while right-clicking opens the context menu with `Settings` and `Exit`.',
   },
 ];
 
@@ -160,6 +317,29 @@ export default function App() {
   const [fileContents, setFileContents] = useState<Record<string, string>>({});
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
   const [uiTheme, setUiTheme] = useState<'dark' | 'light'>('dark');
+
+  // Interactive Display Tab Simulator State
+  const [simScreen, setSimScreen] = useState<'screen_1' | 'screen_2'>('screen_1');
+  const [simScreensState, setSimScreensState] = useState<{
+    screen_1: { enabled: boolean; paused: boolean; tags: string; mode: string; postIdx: number };
+    screen_2: { enabled: boolean; paused: boolean; tags: string; mode: string; postIdx: number };
+  }>({
+    screen_1: {
+      enabled: true,
+      paused: false,
+      tags: 'scenery no_humans highres',
+      mode: 'masonry',
+      postIdx: 0,
+    },
+    screen_2: {
+      enabled: true,
+      paused: false,
+      tags: 'genshin_impact furina_(genshin_impact) wlop',
+      mode: 'slideshow',
+      postIdx: 0,
+    },
+  });
+  const [simShowSuggest, setSimShowSuggest] = useState(false);
 
   useEffect(() => {
     FILE_LIST.forEach(async (item) => {
@@ -191,6 +371,45 @@ export default function App() {
   };
 
   const isDark = uiTheme === 'dark';
+  const curScreenState = simScreensState[simScreen];
+  const curPosts = SAMPLE_MEDIA_POSTS[simScreen] || SAMPLE_MEDIA_POSTS.screen_1;
+  const curMedia = curPosts[curScreenState.postIdx % curPosts.length];
+  const sharedPoolActive =
+    simScreensState.screen_1.enabled &&
+    simScreensState.screen_2.enabled &&
+    simScreensState.screen_1.tags.trim().toLowerCase() ===
+      simScreensState.screen_2.tags.trim().toLowerCase();
+
+  const getTagColor = (tagName: string): string => {
+    const clean = tagName.replace(/^[-~]+/, '').toLowerCase();
+    const cat: TagCategory = clean.includes(':')
+      ? 5
+      : KNOWN_TAG_CATEGORIES[clean] !== undefined
+      ? KNOWN_TAG_CATEGORIES[clean]
+      : 0;
+    return isDark ? DANBOORU_CAT_META[cat].darkHex : DANBOORU_CAT_META[cat].lightHex;
+  };
+
+  const getCatColorById = (cat: TagCategory): string => {
+    return isDark ? DANBOORU_CAT_META[cat].darkHex : DANBOORU_CAT_META[cat].lightHex;
+  };
+
+  const appendTagToSimScreen = (tag: string) => {
+    setSimScreensState((prev) => {
+      const existing = prev[simScreen].tags.trim();
+      const tokens = existing ? existing.split(/\s+/) : [];
+      if (tokens.some((t) => t.replace(/^[-~]+/, '').toLowerCase() === tag.toLowerCase())) {
+        return prev;
+      }
+      return {
+        ...prev,
+        [simScreen]: {
+          ...prev[simScreen],
+          tags: existing ? `${existing} ${tag}` : tag,
+        },
+      };
+    });
+  };
 
   return (
     <div
@@ -204,10 +423,10 @@ export default function App() {
         <div>
           <h1 className="text-base font-bold tracking-tight flex items-center gap-2">
             <LayoutGrid className="w-5 h-5 text-blue-500" />
-            Danbooru Wallpaper Suite v2.1 — Polaroid, Masonry, Queue Controls & Security Hardening
+            Danbooru Wallpaper Suite v2.3.0 — Per-Screen Display Tab Search, Danbooru Tag Colors & Shared Pools
           </h1>
           <p className={`text-xs mt-0.5 ${isDark ? 'text-zinc-400' : 'text-zinc-600'}`}>
-            4 Display Modes (Scroll • Polaroid • Slideshow • Masonry) • Prev/Next Search Controls • Anti-Malware Binary Magic-Byte Proxy
+            Integrated Display Tab Search • Per-Screen ⟳ / ◀ / ▶ / PAUSE • Shared Tag-Pool Deduplication • 4-Layer Media Tags Box • Instant Left-Click Tray
           </p>
         </div>
 
@@ -231,6 +450,19 @@ export default function App() {
               Updated Source Files ({FILE_LIST.length})
             </button>
             <button
+              onClick={() => setActiveTab('preview')}
+              className={`px-3 py-1 rounded flex items-center gap-1.5 cursor-pointer ${
+                activeTab === 'preview'
+                  ? 'bg-blue-600 text-white'
+                  : isDark
+                  ? 'text-zinc-400 hover:text-zinc-200'
+                  : 'text-zinc-600 hover:text-zinc-900'
+              }`}
+            >
+              <Monitor className="w-3.5 h-3.5" />
+              Interactive Display Tab Preview
+            </button>
+            <button
               onClick={() => setActiveTab('audit')}
               className={`px-3 py-1 rounded flex items-center gap-1.5 cursor-pointer ${
                 activeTab === 'audit'
@@ -241,7 +473,7 @@ export default function App() {
               }`}
             >
               <ShieldCheck className="w-3.5 h-3.5" />
-              Security Audit & Feature Report ({SECURITY_AUDIT_ITEMS.length + FEATURE_SUMMARY_ITEMS.length})
+              Requirements & Security Audit ({FEATURE_SUMMARY_ITEMS.length + SECURITY_AUDIT_ITEMS.length})
             </button>
             <button
               onClick={() => setActiveTab('build')}
@@ -335,19 +567,22 @@ export default function App() {
             >
               <div className="font-semibold flex items-center gap-1.5 text-emerald-500">
                 <Wrench className="w-3.5 h-3.5" />
-                Verified Security & Feature Updates
+                Verified v2.3.0 Updates
               </div>
               <div>
-                • <strong>Polaroid</strong> rename applied across all UI controls, properties, and documentation.
+                • <strong>Standalone search window removed</strong>; controls embedded in Display tab (no minimize button).
               </div>
               <div>
-                • <strong>Masonry</strong> mode with 4–36 tiles, 0–10px gap, 1–60s delay, 3D Y-flip, neighbor reflow, and full GIF/MP4 playthrough verification.
+                • <strong>⟳, ◀, ▶, PAUSE</strong> placed above TAGS bar and below Screen Select & Display checkbox.
               </div>
               <div>
-                • <strong>Previous (◀) & Next (▶)</strong> vertical rectangle search bar buttons.
+                • <strong>Per-screen TAGS & Shared Pools</strong>: unchecked screens never fetch; identical tags share one pool.
               </div>
               <div>
-                • <strong>Anti-Malware / PHP Inspection</strong> via binary magic-byte verification and strict URL path filtering.
+                • <strong>4-Layer Displayed Media Tags Box</strong> & <strong>Danbooru Category Colors</strong> across all 3 tag areas.
+              </div>
+              <div>
+                • <strong>Instant Tray Left-Click</strong> opens Settings directly; right-click shows Exit menu.
               </div>
             </div>
           </aside>
@@ -392,6 +627,342 @@ export default function App() {
         </div>
       )}
 
+      {activeTab === 'preview' && (
+        <div className="flex-1 overflow-auto p-6 max-w-4xl mx-auto w-full space-y-6">
+          <div
+            className={`p-4 rounded border flex flex-wrap items-center justify-between gap-4 ${
+              isDark ? 'border-zinc-800 bg-[#121218]' : 'border-zinc-300 bg-white'
+            }`}
+          >
+            <div>
+              <h2 className="text-sm font-bold flex items-center gap-2">
+                <Monitor className="w-4 h-4 text-blue-500" />
+                Interactive Simulation of the Updated SettingsDialog &rarr; Display Tab
+              </h2>
+              <p className={`text-xs mt-0.5 ${isDark ? 'text-zinc-400' : 'text-zinc-600'}`}>
+                Test switching screens, unchecking display (stops media fetch), clicking color-coded tags in the 4-layer Displayed Media Tags box, or typing tags to see Danbooru category color coordination.
+              </p>
+            </div>
+            <div className="flex flex-wrap items-center gap-3 text-xs font-semibold">
+              {([0, 1, 3, 4, 5] as TagCategory[]).map((cid) => (
+                <span key={cid} className="flex items-center gap-1.5">
+                  <span
+                    className="w-2.5 h-2.5 rounded-sm inline-block"
+                    style={{ backgroundColor: getCatColorById(cid) }}
+                  />
+                  <span style={{ color: getCatColorById(cid) }}>{DANBOORU_CAT_META[cid].name}</span>
+                </span>
+              ))}
+            </div>
+          </div>
+
+          {/* Simulated Tkinter SettingsDialog Window */}
+          <div
+            className={`max-w-2xl mx-auto rounded border shadow-xl overflow-hidden ${
+              isDark ? 'bg-[#121214] border-[#323238]' : 'bg-[#f4f4f7] border-[#b8b8c0]'
+            }`}
+          >
+            {/* Header */}
+            <div className="px-4 py-2.5 flex items-center justify-between border-b border-zinc-700/40">
+              <span className="text-xs font-bold tracking-wide">⚙ APPLICATION SETTINGS</span>
+              <div className="flex items-center gap-3">
+                <span className="px-2.5 py-1 rounded bg-[#0067c0] text-white text-[11px] font-bold">
+                  📊 Resource Graph
+                </span>
+                <span className="text-xs font-bold opacity-60">✕</span>
+              </div>
+            </div>
+
+            {/* Notebook Tabs */}
+            <div className="px-3 pt-2 flex gap-1 border-b border-zinc-700/40 text-xs font-bold">
+              <span className={`px-3.5 py-1.5 rounded-t opacity-60 ${isDark ? 'bg-[#232329]' : 'bg-[#e8e8ed]'}`}>
+                Credentials
+              </span>
+              <span className="px-3.5 py-1.5 rounded-t bg-[#0067c0] text-white">Display</span>
+              <span className={`px-3.5 py-1.5 rounded-t opacity-60 ${isDark ? 'bg-[#232329]' : 'bg-[#e8e8ed]'}`}>
+                Logs
+              </span>
+            </div>
+
+            {/* Display Tab Body */}
+            <div className="p-4 space-y-3 text-xs">
+              {/* 1. Select Screen Dropdown */}
+              <div className="flex items-center justify-between gap-4">
+                <label className="font-bold w-48">Select Screen:</label>
+                <select
+                  value={simScreen}
+                  onChange={(e) => {
+                    setSimScreen(e.target.value as 'screen_1' | 'screen_2');
+                    setSimShowSuggest(false);
+                  }}
+                  className={`flex-1 px-2.5 py-1.5 rounded border font-semibold ${
+                    isDark ? 'bg-[#1c1c21] border-[#323238] text-zinc-100' : 'bg-white border-[#b8b8c0] text-zinc-900'
+                  }`}
+                >
+                  <option value="screen_1">Screen 1 (2560x1440 Primary)</option>
+                  <option value="screen_2">Screen 2 (1920x1080 Secondary)</option>
+                </select>
+              </div>
+
+              {/* 2. Display Wallpaper Checkbox */}
+              <div className="flex items-center justify-between">
+                <label className="flex items-center gap-2 font-bold cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={curScreenState.enabled}
+                    onChange={(e) =>
+                      setSimScreensState((prev) => ({
+                        ...prev,
+                        [simScreen]: { ...prev[simScreen], enabled: e.target.checked },
+                      }))
+                    }
+                    className="w-4 h-4 accent-[#0067c0]"
+                  />
+                  Display wallpaper on this screen
+                </label>
+                {sharedPoolActive && (
+                  <span className="text-[11px] font-semibold text-emerald-500">
+                    ⚡ Shared Tag Pool Active (Screen 1 &amp; Screen 2 reuse 1 API fetch)
+                  </span>
+                )}
+              </div>
+
+              {/* 3. Per-Screen Search & Playback Sub-Panel (No Minimize Button) */}
+              <div
+                className={`p-3 rounded border space-y-2.5 ${
+                  isDark ? 'border-[#323238] bg-[#16161a]' : 'border-[#b8b8c0] bg-[#ededf2]'
+                }`}
+              >
+                {/* 3a. Control Row ABOVE the TAGS Search Bar */}
+                <div className="flex items-center justify-between gap-2">
+                  <span
+                    className={`px-2.5 py-1 rounded font-bold text-[11px] ${
+                      !curScreenState.enabled
+                        ? isDark
+                          ? 'bg-[#232329] text-zinc-400'
+                          : 'bg-[#e8e8ed] text-zinc-600'
+                        : curScreenState.paused
+                        ? 'bg-blue-500/20 text-blue-400'
+                        : isDark
+                        ? 'bg-[#18331a] text-[#6ccb5f]'
+                        : 'bg-[#dff6dd] text-[#0f7b0f]'
+                    }`}
+                  >
+                    {!curScreenState.enabled
+                      ? '○ Screen Disabled (No Fetch)'
+                      : curScreenState.paused
+                      ? '⏸ Screen Paused'
+                      : '✔ P:1 (84 pooled)'}
+                  </span>
+
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      onClick={() =>
+                        setSimScreensState((prev) => ({
+                          ...prev,
+                          [simScreen]: { ...prev[simScreen], postIdx: prev[simScreen].postIdx + 1 },
+                        }))
+                      }
+                      title="Refresh selected screen tag pool"
+                      className={`px-2.5 py-1 rounded border font-bold cursor-pointer flex items-center gap-1 ${
+                        isDark
+                          ? 'bg-[#232329] border-[#323238] hover:bg-[#2e2e36]'
+                          : 'bg-[#e8e8ed] border-[#b8b8c0] hover:bg-[#dcdce2]'
+                      }`}
+                    >
+                      <RotateCw className="w-3.5 h-3.5" />
+                    </button>
+                    <button
+                      onClick={() =>
+                        setSimScreensState((prev) => ({
+                          ...prev,
+                          [simScreen]: {
+                            ...prev[simScreen],
+                            postIdx: Math.max(0, prev[simScreen].postIdx - 1),
+                          },
+                        }))
+                      }
+                      title="Previous media on selected screen"
+                      className={`px-2 py-1 rounded border font-bold cursor-pointer ${
+                        isDark
+                          ? 'bg-[#232329] border-[#323238] hover:bg-[#2e2e36]'
+                          : 'bg-[#e8e8ed] border-[#b8b8c0] hover:bg-[#dcdce2]'
+                      }`}
+                    >
+                      <ChevronLeft className="w-3.5 h-3.5" />
+                    </button>
+                    <button
+                      onClick={() =>
+                        setSimScreensState((prev) => ({
+                          ...prev,
+                          [simScreen]: { ...prev[simScreen], postIdx: prev[simScreen].postIdx + 1 },
+                        }))
+                      }
+                      title="Next media on selected screen"
+                      className={`px-2 py-1 rounded border font-bold cursor-pointer ${
+                        isDark
+                          ? 'bg-[#232329] border-[#323238] hover:bg-[#2e2e36]'
+                          : 'bg-[#e8e8ed] border-[#b8b8c0] hover:bg-[#dcdce2]'
+                      }`}
+                    >
+                      <ChevronRight className="w-3.5 h-3.5" />
+                    </button>
+                    <button
+                      onClick={() =>
+                        setSimScreensState((prev) => ({
+                          ...prev,
+                          [simScreen]: { ...prev[simScreen], paused: !prev[simScreen].paused },
+                        }))
+                      }
+                      className={`px-3 py-1 rounded font-bold cursor-pointer flex items-center gap-1 ${
+                        curScreenState.paused
+                          ? 'bg-[#0067c0] text-white'
+                          : isDark
+                          ? 'bg-[#232329] text-zinc-100 hover:bg-[#2e2e36]'
+                          : 'bg-[#e8e8ed] text-zinc-900 hover:bg-[#dcdce2]'
+                      }`}
+                    >
+                      {curScreenState.paused ? (
+                        <>
+                          <Play className="w-3 h-3" /> PAUSED
+                        </>
+                      ) : (
+                        <>
+                          <Pause className="w-3 h-3" /> PAUSE
+                        </>
+                      )}
+                    </button>
+                  </div>
+                </div>
+
+                {/* 3b. TAGS Search Row with Danbooru Category Colors & Below-Input Auto-Suggestions */}
+                <div className="relative">
+                  <div className="flex items-center gap-2">
+                    <span className="font-bold shrink-0">TAGS =</span>
+                    <div
+                      className={`flex-1 flex items-center rounded border overflow-hidden ${
+                        isDark ? 'bg-[#1c1c21] border-[#323238]' : 'bg-white border-[#b8b8c0]'
+                      }`}
+                    >
+                      <input
+                        type="text"
+                        value={curScreenState.tags}
+                        onFocus={() => setSimShowSuggest(true)}
+                        onChange={(e) => {
+                          setSimScreensState((prev) => ({
+                            ...prev,
+                            [simScreen]: { ...prev[simScreen], tags: e.target.value },
+                          }));
+                          setSimShowSuggest(true);
+                        }}
+                        className="flex-1 px-2.5 py-1.5 bg-transparent outline-none font-mono text-xs font-bold"
+                        placeholder="Type Danbooru tags..."
+                      />
+                      <button
+                        onClick={() => setSimShowSuggest((v) => !v)}
+                        title="Toggle suggestions below input"
+                        className={`px-2.5 py-1.5 border-l cursor-pointer ${
+                          isDark ? 'bg-[#232329] border-[#323238]' : 'bg-[#ececf0] border-[#b8b8c0]'
+                        }`}
+                      >
+                        <ChevronDown className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Color-coded token preview bar matching the Tkinter Text widget coloring */}
+                  <div className="mt-1.5 flex flex-wrap items-center gap-1.5 pl-14">
+                    <span className="text-[10px] opacity-60">Live Category Coloring:</span>
+                    {curScreenState.tags
+                      .trim()
+                      .split(/\s+/)
+                      .filter(Boolean)
+                      .map((tok, idx) => (
+                        <span
+                          key={`${tok}-${idx}`}
+                          style={{ color: getTagColor(tok) }}
+                          className="font-mono text-xs font-bold"
+                        >
+                          {tok}
+                        </span>
+                      ))}
+                  </div>
+
+                  {/* Auto-Suggestion Dropdown (Populates BELOW the TAGS search box) */}
+                  {simShowSuggest && (
+                    <div
+                      className={`mt-1 ml-14 rounded border shadow-lg overflow-hidden z-20 ${
+                        isDark ? 'bg-[#1c1c21] border-[#323238]' : 'bg-white border-[#b8b8c0]'
+                      }`}
+                    >
+                      <div className="px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider opacity-60 border-b border-zinc-700/30 flex justify-between">
+                        <span>Auto-Suggestions (Populates Below TAGS Search Box)</span>
+                        <button onClick={() => setSimShowSuggest(false)} className="cursor-pointer">
+                          ✕
+                        </button>
+                      </div>
+                      {SAMPLE_SUGGESTIONS.slice(0, 5).map((s) => (
+                        <div
+                          key={s.name}
+                          onClick={() => {
+                            appendTagToSimScreen(s.name);
+                            setSimShowSuggest(false);
+                          }}
+                          style={{ color: getCatColorById(s.cat) }}
+                          className={`px-3 py-1.5 font-mono text-xs font-bold flex items-center justify-between cursor-pointer ${
+                            isDark ? 'hover:bg-[#2a2d3e]' : 'hover:bg-[#e5f1fb]'
+                          }`}
+                        >
+                          <span>{s.name}</span>
+                          <span className="opacity-70">({s.count.toLocaleString()})</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {/* 3c. Permanent 4-Layer Scrollable Displayed Media Tags Box */}
+                <div className="space-y-1 pt-1">
+                  <div className="flex items-center justify-between text-[11px] font-bold opacity-75">
+                    <span>DISPLAYED MEDIA TAGS (CLICK TAG TO ADD TO SEARCH):</span>
+                    {curScreenState.enabled && (
+                      <span>
+                        Post #{curMedia.postId} ({curMedia.tags.length} tags)
+                      </span>
+                    )}
+                  </div>
+                  <div
+                    className={`h-24 overflow-y-auto p-2.5 rounded border font-mono text-xs leading-6 ${
+                      isDark ? 'bg-[#1c1c21] border-[#323238]' : 'bg-white border-[#b8b8c0]'
+                    }`}
+                  >
+                    {!curScreenState.enabled ? (
+                      <span className="italic opacity-60 font-sans">
+                        Screen display is currently unchecked — enable screen to fetch and display media tags.
+                      </span>
+                    ) : (
+                      <div className="flex flex-wrap gap-x-3 gap-y-1">
+                        {curMedia.tags.map((t) => (
+                          <button
+                            key={t.name}
+                            onClick={() => appendTagToSimScreen(t.name)}
+                            style={{ color: getCatColorById(t.cat) }}
+                            className="font-bold hover:underline cursor-pointer text-left"
+                            title={`Category: ${DANBOORU_CAT_META[t.cat].name} — Click to add '${t.name}' to ${simScreen} TAGS`}
+                          >
+                            {t.name}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {activeTab === 'audit' && (
         <div className="flex-1 overflow-auto p-6 max-w-5xl mx-auto w-full space-y-6">
           <div
@@ -400,8 +971,50 @@ export default function App() {
             }`}
           >
             <h2 className="text-sm font-bold flex items-center gap-2">
+              <AlertTriangle className="w-4 h-4 text-blue-500" />
+              v2.3.0 Requirements Implementation Summary (Requirements 1 through 9)
+            </h2>
+          </div>
+
+          <div className="space-y-3">
+            {FEATURE_SUMMARY_ITEMS.map((item) => (
+              <div
+                key={item.id}
+                className={`p-4 rounded border space-y-2 ${
+                  isDark ? 'border-zinc-800 bg-[#101015]' : 'border-zinc-300 bg-white'
+                }`}
+              >
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <span className="font-mono text-xs font-bold px-2 py-0.5 rounded bg-blue-600/20 text-blue-400 border border-blue-500/30">
+                      {item.id}
+                    </span>
+                    <span className="font-semibold text-sm">{item.issue}</span>
+                  </div>
+                  <span className="font-mono text-xs text-zinc-400">{item.file}</span>
+                </div>
+                <div className={`text-xs space-y-1.5 ${isDark ? 'text-zinc-300' : 'text-zinc-700'}`}>
+                  <div>
+                    <span className="font-bold text-blue-400">Requirement: </span>
+                    {item.cause}
+                  </div>
+                  <div>
+                    <span className="font-bold text-emerald-500">Implementation: </span>
+                    {item.fix}
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <div
+            className={`p-4 rounded border ${
+              isDark ? 'border-zinc-800 bg-[#121218]' : 'border-zinc-300 bg-white'
+            }`}
+          >
+            <h2 className="text-sm font-bold flex items-center gap-2">
               <ShieldCheck className="w-4 h-4 text-emerald-500" />
-              PHP & Malware Download Vulnerability Audit (SEC-01 through SEC-05)
+              PHP &amp; Malware Download Vulnerability Audit (SEC-01 through SEC-05)
             </h2>
             <p className={`text-xs mt-1 ${isDark ? 'text-zinc-400' : 'text-zinc-600'}`}>
               Comprehensive security scan and remediation across <code className="font-mono">danbooru_service.py</code> and{' '}
@@ -433,48 +1046,6 @@ export default function App() {
                   </div>
                   <div>
                     <span className="font-bold text-emerald-500">Remediation Implemented: </span>
-                    {item.fix}
-                  </div>
-                </div>
-              </div>
-            ))}
-          </div>
-
-          <div
-            className={`p-4 rounded border ${
-              isDark ? 'border-zinc-800 bg-[#121218]' : 'border-zinc-300 bg-white'
-            }`}
-          >
-            <h2 className="text-sm font-bold flex items-center gap-2">
-              <AlertTriangle className="w-4 h-4 text-blue-500" />
-              Feature & Display Mode Implementation Summary
-            </h2>
-          </div>
-
-          <div className="space-y-3">
-            {FEATURE_SUMMARY_ITEMS.map((item) => (
-              <div
-                key={item.id}
-                className={`p-4 rounded border space-y-2 ${
-                  isDark ? 'border-zinc-800 bg-[#101015]' : 'border-zinc-300 bg-white'
-                }`}
-              >
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div className="flex items-center gap-2">
-                    <span className="font-mono text-xs font-bold px-2 py-0.5 rounded bg-blue-600/20 text-blue-400 border border-blue-500/30">
-                      {item.id}
-                    </span>
-                    <span className="font-semibold text-sm">{item.issue}</span>
-                  </div>
-                  <span className="font-mono text-xs text-zinc-400">{item.file}</span>
-                </div>
-                <div className={`text-xs space-y-1.5 ${isDark ? 'text-zinc-300' : 'text-zinc-700'}`}>
-                  <div>
-                    <span className="font-bold text-blue-400">Requirement: </span>
-                    {item.cause}
-                  </div>
-                  <div>
-                    <span className="font-bold text-emerald-500">Implementation: </span>
                     {item.fix}
                   </div>
                 </div>
