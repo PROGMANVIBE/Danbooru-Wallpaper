@@ -1,2 +1,22 @@
 @import "tailwindcss";
 @custom-variant dark (&:where(.dark, .dark *));
+
+@keyframes saved-search-marquee {
+  0% {
+    transform: translateX(0%);
+  }
+  100% {
+    transform: translateX(-50%);
+  }
+}
+
+.animate-saved-marquee {
+  display: inline-flex;
+  width: max-content;
+  animation: saved-search-marquee 14s linear infinite;
+}
+
+.animate-saved-marquee:hover {
+  animation-play-state: paused;
+}
+

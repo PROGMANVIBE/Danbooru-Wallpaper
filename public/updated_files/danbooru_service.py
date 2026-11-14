@@ -1932,14 +1932,14 @@ def get_danbooru_tag_color(category_id: int, theme: str = None) -> str:
     return pal.get(int(category_id or 0), pal[0])
 
 
-def lookup_cached_tag_category(raw_token: str) -> int:
+def lookup_cached_tag_category(raw_token: str, default=None):
     """Looks up a tag token's Danbooru category (stripping leading '-' or '~' operators)."""
     clean = str(raw_token or "").strip().lstrip("-~").lower()
     if not clean:
         return 0
     if clean.startswith(("rating:", "order:", "ordfav:", "score:", "width:", "height:", "mpixels:", "filesize:", "filetype:", "id:", "date:", "pool:", "parent:", "child:", "source:", "status:")):
         return 5
-    return TAG_CATEGORY_CACHE.get(clean, 0)
+    return TAG_CATEGORY_CACHE.get(clean, default)
 
 
 def get_screen_runtime_state(screen_id: str) -> dict:
@@ -2511,7 +2511,15 @@ def suggestion_worker_loop():
                 if resolve_unknown_tag_categories(unknown_tokens):
                     if IS_RUNNING and TK_ROOT and SETTINGS_DIALOG_INSTANCE and getattr(SETTINGS_DIALOG_INSTANCE, "is_open", False):
                         try:
-                            TK_ROOT.after(0, SETTINGS_DIALOG_INSTANCE._recolor_search_input_tags)
+                            TK_ROOT.after(
+                                0,
+                                lambda: (
+                                    SETTINGS_DIALOG_INSTANCE._recolor_search_input_tags(),
+                                    SETTINGS_DIALOG_INSTANCE._render_displayed_media_tags_box(force=True),
+                                )
+                                if SETTINGS_DIALOG_INSTANCE and getattr(SETTINGS_DIALOG_INSTANCE, "is_open", False)
+                                else None,
+                            )
                         except (tk.TclError, RuntimeError):
                             pass
             TAG_LOOKUP_QUEUE.task_done()
@@ -2665,8 +2673,8 @@ def fill_tag_pool(raw_tags: str, wait_if_busy: bool = False, force_reset: bool =
             FETCH_CONDITION.notify_all()
 
 
-def ensure_screen_tag_pool_populated_async(screen_id: str):
-    """Spawns a background fetch for screen_id's tag pool only if screen_id is enabled and its pool is empty."""
+def ensure_screen_tag_pool_populated_async(screen_id: str, force_reset: bool = False):
+    """Spawns a background fetch for screen_id's tag pool only if screen_id is enabled and its pool is empty (or force_reset is True)."""
     if APP_PAUSED:
         return
     sc_cfg = get_screen_config(screen_id)
@@ -2674,13 +2682,20 @@ def ensure_screen_tag_pool_populated_async(screen_id: str):
         return
     tags = sc_cfg.get("properties", {}).get("searchtags", {}).get("value", DEFAULT_TAGS)
     with DATA_LOCK:
+        st = get_screen_runtime_state(screen_id)
         _, pool = get_or_create_tag_pool_locked(tags)
-        should_fetch = (len(pool["posts"]) == 0 and not pool["is_fetching"])
+        if force_reset:
+            st["epoch"] += 1
+            st["seen_post_ids"].clear()
+            pool["next_allowed_fetch_time"] = 0.0
+            should_fetch = not pool["is_fetching"]
+        else:
+            should_fetch = (len(pool["posts"]) == 0 and not pool["is_fetching"])
     if should_fetch:
-        threading.Thread(target=fill_tag_pool, args=(tags, False, False), daemon=True).start()
+        threading.Thread(target=fill_tag_pool, args=(tags, False, force_reset), daemon=True).start()
 
 
-def ensure_all_enabled_screen_pools_populated():
+def ensure_all_enabled_screen_pools_populated(force_reset: bool = False):
     """Starts background fetches for unique tag pools used by enabled screens (deduplicating shared tags)."""
     if APP_PAUSED:
         return
@@ -2692,14 +2707,23 @@ def ensure_all_enabled_screen_pools_populated():
             continue
         tags = sc_cfg.get("properties", {}).get("searchtags", {}).get("value", DEFAULT_TAGS)
         pkey = canonical_pool_key(tags)
+        with DATA_LOCK:
+            st = get_screen_runtime_state(sid)
+            if force_reset:
+                st["epoch"] += 1
+                st["seen_post_ids"].clear()
         if pkey in seen_pools:
             continue
         seen_pools.add(pkey)
         with DATA_LOCK:
             _, pool = get_or_create_tag_pool_locked(tags)
-            should_fetch = (len(pool["posts"]) == 0 and not pool["is_fetching"])
+            if force_reset:
+                pool["next_allowed_fetch_time"] = 0.0
+                should_fetch = not pool["is_fetching"]
+            else:
+                should_fetch = (len(pool["posts"]) == 0 and not pool["is_fetching"])
         if should_fetch:
-            threading.Thread(target=fill_tag_pool, args=(tags, False, False), daemon=True).start()
+            threading.Thread(target=fill_tag_pool, args=(tags, False, force_reset), daemon=True).start()
 
 
 # =============================================================================
@@ -2780,25 +2804,50 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 post_id = int(post_id_str or 0)
             except ValueError:
                 post_id = 0
+            raw_tags = query_params.get("tags", [""])[0]
 
-            if post_id > 0:
-                with DATA_LOCK:
-                    st = get_screen_runtime_state(screen_id)
+            tags_list = []
+            unknown_for_lookup = []
+            with DATA_LOCK:
+                st = get_screen_runtime_state(screen_id)
+                if post_id > 0:
                     tags_list = list(POST_TAGS_CACHE.get(post_id, []))
+                if not tags_list and raw_tags:
+                    seen_t = set()
+                    for tok in raw_tags.split():
+                        clean_t = tok.strip()
+                        if not clean_t or clean_t in seen_t:
+                            continue
+                        seen_t.add(clean_t)
+                        cat = lookup_cached_tag_category(clean_t, default=None)
+                        if cat is None:
+                            cat = 0
+                            unknown_for_lookup.append(clean_t)
+                        tags_list.append((clean_t, cat))
+                    if post_id > 0 and tags_list:
+                        POST_TAGS_CACHE[post_id] = list(tags_list)
+
+                if post_id > 0 or tags_list:
                     st["last_displayed_post_id"] = post_id
                     if tags_list:
                         st["last_displayed_tags"] = tags_list
 
-                if tags_list and TK_ROOT and SETTINGS_DIALOG_INSTANCE and getattr(SETTINGS_DIALOG_INSTANCE, "is_open", False):
-                    try:
-                        TK_ROOT.after(
-                            0,
-                            lambda sid=screen_id, pid=post_id, tl=tags_list: SETTINGS_DIALOG_INSTANCE.on_screen_media_displayed(
-                                sid, pid, tl
-                            ),
-                        )
-                    except (tk.TclError, RuntimeError):
-                        pass
+            if unknown_for_lookup:
+                try:
+                    TAG_LOOKUP_QUEUE.put_nowait(unknown_for_lookup)
+                except Exception:
+                    pass
+
+            if (post_id > 0 or tags_list) and TK_ROOT and SETTINGS_DIALOG_INSTANCE and getattr(SETTINGS_DIALOG_INSTANCE, "is_open", False):
+                try:
+                    TK_ROOT.after(
+                        0,
+                        lambda sid=screen_id, pid=post_id, tl=tags_list: SETTINGS_DIALOG_INSTANCE.on_screen_media_displayed(
+                            sid, pid, tl
+                        ),
+                    )
+                except (tk.TclError, RuntimeError):
+                    pass
 
             try:
                 ok_body = b'{"ok":true}'
@@ -4400,6 +4449,11 @@ class SettingsDialog(tk.Toplevel):
         self._live_apply_job = None
         self._status_poll_job = None
         self._debounce_timer = None
+        self._auto_tag_refresh_job = None
+        self._saved_marquee_job = None
+        self._saved_marquee_items = []
+        self._toast_hide_job = None
+        self._last_applied_tags_by_screen = {}
         self._suggest_req_id = 0
         self._nav_cooldown_active = False
         self._syncing_controls = False
@@ -4485,18 +4539,63 @@ class SettingsDialog(tk.Toplevel):
         self.title_lbl.bind("<B1-Motion>", self.do_move)
 
         self.style = ttk.Style(self)
-        self.notebook = ttk.Notebook(self.container)
-        self.notebook.pack(fill="both", expand=True, padx=12, pady=(4, 12))
-        self.notebook.bind("<<NotebookTabChanged>>", lambda e: self._hide_all_popups())
 
-        self.tab_credentials = tk.Frame(self.notebook, bg=self.bg_base)
-        self.tab_display = tk.Frame(self.notebook, bg=self.bg_base)
-        self.tab_logs = tk.Frame(self.notebook, bg=self.bg_base)
+        # Custom Theme-Aware Tab Bar (replaces Windows uxtheme white TNotebook tabs;
+        # adds a 1px contrasting white outline in Dark Mode and a 2px gap between each tab)
+        self.tab_bar_frame = tk.Frame(self.container, bg=self.bg_base)
+        self.tab_bar_frame.pack(fill="x", padx=12, pady=(4, 0))
+        self._themed_frames.append(self.tab_bar_frame)
+
+        self.tab_content_holder = tk.Frame(
+            self.container,
+            bg=self.bg_base,
+            highlightthickness=1,
+            highlightbackground=self.border_col,
+        )
+        self.tab_content_holder.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+        self._themed_frames.append(self.tab_content_holder)
+        self._themed_borders.append(self.tab_content_holder)
+
+        self.tab_credentials = tk.Frame(self.tab_content_holder, bg=self.bg_base)
+        self.tab_display = tk.Frame(self.tab_content_holder, bg=self.bg_base)
+        self.tab_logs = tk.Frame(self.tab_content_holder, bg=self.bg_base)
         self._themed_frames.extend([self.tab_credentials, self.tab_display, self.tab_logs])
 
-        self.notebook.add(self.tab_credentials, text="Credentials")
-        self.notebook.add(self.tab_display, text="Display")
-        self.notebook.add(self.tab_logs, text="Logs")
+        self._tab_frames_by_key = {
+            "credentials": self.tab_credentials,
+            "display": self.tab_display,
+            "logs": self.tab_logs,
+        }
+        self._tab_header_widgets = {}
+        self.active_settings_tab = "display" if (USERNAME and API_KEY) else "credentials"
+
+        for tab_key, tab_title in (
+            ("credentials", "Credentials"),
+            ("display", "Display"),
+            ("logs", "Logs"),
+        ):
+            tab_border = tk.Frame(
+                self.tab_bar_frame,
+                bg=pal["btn_bg"],
+                highlightthickness=1,
+                highlightbackground="#ffffff" if CURRENT_THEME == "dark" else self.border_col,
+                highlightcolor="#ffffff" if CURRENT_THEME == "dark" else self.border_col,
+            )
+            # 2px space between each tab so they are never smashed together
+            tab_border.pack(side="left", padx=(0, 2), pady=(0, 2))
+
+            tab_lbl = tk.Label(
+                tab_border,
+                text=tab_title,
+                font=("Segoe UI", 9, "bold"),
+                padx=16,
+                pady=5,
+                cursor="hand2",
+            )
+            tab_lbl.pack(fill="both", expand=True)
+            tab_lbl.bind("<Button-1>", lambda e, k=tab_key: self._select_settings_tab(k))
+            tab_border.bind("<Button-1>", lambda e, k=tab_key: self._select_settings_tab(k))
+            self._tab_header_widgets[tab_key] = (tab_border, tab_lbl)
 
         self.saved_list = load_saved_searches()
         self.suggest_labels = []
@@ -4507,17 +4606,52 @@ class SettingsDialog(tk.Toplevel):
         self._build_display_tab()
         self._build_logs_tab()
 
-        # Select Display tab by default when credentials are already configured
-        if USERNAME and API_KEY:
-            try:
-                self.notebook.select(self.tab_display)
-            except Exception:
-                pass
-
+        self._select_settings_tab(self.active_settings_tab)
         self.apply_theme()
         self.bind("<Escape>", self._on_escape_pressed)
         self.bind("<FocusOut>", self._on_dialog_focus_out)
         self._poll_display_status()
+
+    def _select_settings_tab(self, tab_key: str):
+        """Switches the active Application Settings tab and refreshes theme-aware tab styling."""
+        if tab_key not in self._tab_frames_by_key:
+            return
+        self.active_settings_tab = tab_key
+        self._hide_all_popups()
+        for k, frm in self._tab_frames_by_key.items():
+            if k != tab_key:
+                frm.pack_forget()
+        self._tab_frames_by_key[tab_key].pack(fill="both", expand=True)
+        self._update_settings_tabs_theme()
+
+    def _update_settings_tabs_theme(self):
+        """
+        Styles the Application Settings tabs to match the active theme (Light or Dark Mode).
+        In Dark Mode, tabs use dark backgrounds (#232329 inactive / #0067c0 active) with a
+        1px contrasting white outline (#ffffff) and 2px spacing between tabs.
+        """
+        is_dark = (CURRENT_THEME == "dark")
+        pal = THEME_PALETTES[CURRENT_THEME]
+        for tab_key, (tab_border, tab_lbl) in self._tab_header_widgets.items():
+            is_active = (tab_key == self.active_settings_tab)
+            if is_dark:
+                outline_col = "#ffffff"
+                bg_col = "#0067c0" if is_active else pal["btn_bg"]
+                fg_col = "#ffffff" if is_active else self.text_dark
+            else:
+                outline_col = "#005da6" if is_active else self.border_col
+                bg_col = "#0067c0" if is_active else pal["btn_bg"]
+                fg_col = "#ffffff" if is_active else self.text_dark
+            try:
+                tab_border.configure(
+                    bg=bg_col,
+                    highlightthickness=1,
+                    highlightbackground=outline_col,
+                    highlightcolor=outline_col,
+                )
+                tab_lbl.configure(bg=bg_col, fg=fg_col)
+            except tk.TclError:
+                pass
 
     # -------------------------------------------------------------------------
     # TAB 1: CREDENTIALS (PURE API AUTH + LIGHT/DARK MODE BUTTON)
@@ -4699,24 +4833,50 @@ class SettingsDialog(tk.Toplevel):
         search_inner.pack(fill="x", padx=10, pady=8)
         self._themed_frames.append(search_inner)
 
-        # 3a. Control Row ABOVE the TAGS Search Bar (Status Badge + Refresh, Previous, Next, Pause)
-        self.search_controls_row = tk.Frame(search_inner, bg=self.bg_base)
+        # 3a. Control Row ABOVE the TAGS Search Bar
+        # Standardized 28px height across Status Indicator, Saved Searches button, Refresh, Previous, Next, and Pause
+        self.search_controls_row = tk.Frame(search_inner, bg=self.bg_base, height=28)
         self.search_controls_row.pack(fill="x", pady=(0, 6))
         self._themed_frames.append(self.search_controls_row)
 
-        self.status_label = tk.Label(
+        # Left: Page & Pool Indicator (standardized 28px height)
+        self.status_frame = tk.Frame(
             self.search_controls_row,
+            bg=pal["btn_bg"],
+            highlightthickness=1,
+            highlightbackground=self.border_col,
+            width=148,
+            height=28,
+        )
+        self.status_frame.pack(side="left", padx=(0, 4))
+        self.status_frame.pack_propagate(False)
+        self._themed_borders.append(self.status_frame)
+
+        self.status_label = tk.Label(
+            self.status_frame,
             text="● Ready",
             fg=self.text_muted,
             bg=pal["btn_bg"],
             font=("Segoe UI", 8, "bold"),
             padx=8,
-            pady=3,
         )
-        self.status_label.pack(side="left")
+        self.status_label.pack(fill="both", expand=True)
+
+        # Right: Pause, Next, Previous, Refresh (packed right-to-left, all standardized to 28px height)
+        self.pause_btn_frame = tk.Frame(
+            self.search_controls_row,
+            bg=pal["btn_bg"],
+            highlightthickness=1,
+            highlightbackground=self.border_col,
+            width=68,
+            height=28,
+        )
+        self.pause_btn_frame.pack(side="right", padx=(2, 0))
+        self.pause_btn_frame.pack_propagate(False)
+        self._themed_borders.append(self.pause_btn_frame)
 
         self.pause_btn = tk.Button(
-            self.search_controls_row,
+            self.pause_btn_frame,
             text="PAUSE",
             fg=self.text_dark,
             bg=pal["btn_bg"],
@@ -4725,18 +4885,16 @@ class SettingsDialog(tk.Toplevel):
             relief="flat",
             font=("Segoe UI", 8, "bold"),
             cursor="hand2",
-            padx=12,
-            pady=4,
             command=self.toggle_selected_screen_pause,
         )
-        self.pause_btn.pack(side="right", padx=(4, 0))
+        self.pause_btn.pack(fill="both", expand=True)
 
         self.next_btn_frame = tk.Frame(
             self.search_controls_row,
             bg=pal["btn_bg"],
             highlightthickness=1,
             highlightbackground=self.border_col,
-            width=26,
+            width=28,
             height=28,
         )
         self.next_btn_frame.pack(side="right", padx=(2, 2))
@@ -4763,7 +4921,7 @@ class SettingsDialog(tk.Toplevel):
             bg=pal["btn_bg"],
             highlightthickness=1,
             highlightbackground=self.border_col,
-            width=26,
+            width=28,
             height=28,
         )
         self.prev_btn_frame.pack(side="right", padx=(2, 2))
@@ -4785,8 +4943,20 @@ class SettingsDialog(tk.Toplevel):
         )
         self.prev_btn.pack(fill="both", expand=True)
 
-        self.refresh_btn = tk.Button(
+        self.refresh_btn_frame = tk.Frame(
             self.search_controls_row,
+            bg=pal["btn_bg"],
+            highlightthickness=1,
+            highlightbackground=self.border_col,
+            width=32,
+            height=28,
+        )
+        self.refresh_btn_frame.pack(side="right", padx=(4, 2))
+        self.refresh_btn_frame.pack_propagate(False)
+        self._themed_borders.append(self.refresh_btn_frame)
+
+        self.refresh_btn = tk.Button(
+            self.refresh_btn_frame,
             text="⟳",
             fg=self.text_dark,
             bg=pal["btn_bg"],
@@ -4794,15 +4964,40 @@ class SettingsDialog(tk.Toplevel):
             activeforeground="#0067c0",
             bd=0,
             relief="flat",
-            font=("Segoe UI", 11, "bold"),
+            font=("Segoe UI", 10, "bold"),
             cursor="hand2",
-            padx=8,
-            pady=1,
             command=self.immediate_refresh_selected_screen,
         )
-        self.refresh_btn.pack(side="right", padx=(0, 2))
+        self.refresh_btn.pack(fill="both", expand=True)
 
-        # 3b. TAGS Search Row (Color-coded per-token Text widget + Saved Searches dropdown button)
+        # Center: Saved Searches button filling all width between Page/Pool indicator and Refresh button
+        self.saved_searches_btn_frame = tk.Frame(
+            self.search_controls_row,
+            bg=pal["btn_bg"],
+            highlightthickness=1,
+            highlightbackground=self.border_col,
+            height=28,
+        )
+        self.saved_searches_btn_frame.pack(side="left", fill="x", expand=True, padx=(2, 2))
+        self.saved_searches_btn_frame.pack_propagate(False)
+        self._themed_borders.append(self.saved_searches_btn_frame)
+
+        self.saved_searches_btn = tk.Button(
+            self.saved_searches_btn_frame,
+            text="Saved Searches  ▾",
+            fg=self.text_dark,
+            bg=pal["btn_bg"],
+            activebackground=pal["btn_active"],
+            activeforeground=self.text_dark,
+            bd=0,
+            relief="flat",
+            font=("Segoe UI", 8, "bold"),
+            cursor="hand2",
+            command=self.toggle_saved_dropdown,
+        )
+        self.saved_searches_btn.pack(fill="both", expand=True)
+
+        # 3b. TAGS Search Row (Color-coded per-token Text widget with dynamic 1-5 line height scaling)
         self.tag_search_row = tk.Frame(search_inner, bg=self.bg_base)
         self.tag_search_row.pack(fill="x", pady=(0, 6))
         self._themed_frames.append(self.tag_search_row)
@@ -4814,7 +5009,7 @@ class SettingsDialog(tk.Toplevel):
             bg=self.bg_base,
             font=("Segoe UI", 9, "bold"),
         )
-        self.tag_label.pack(side="left", padx=(0, 6))
+        self.tag_label.pack(side="left", anchor="n", padx=(0, 6), pady=(5, 0))
         self._themed_labels_dark.append(self.tag_label)
 
         self.search_container = tk.Frame(
@@ -4832,40 +5027,30 @@ class SettingsDialog(tk.Toplevel):
             fg=self.text_dark,
             insertbackground=self.text_dark,
             bd=0,
+            width=20,
             height=1,
-            wrap="none",
+            wrap="word",
             font=("Segoe UI", 9, "bold"),
             relief="flat",
-             padx=6,
+            padx=6,
             pady=4,
             undo=True,
         )
-        self.tag_input.pack(side="left", fill="x", expand=True)
-
-        self.saved_arrow_btn = tk.Button(
-            self.search_container,
-            text="▼",
-            fg=self.text_muted,
-            bg=pal["arrow_bg"],
-            activebackground=pal["btn_active"],
-            activeforeground=self.text_dark,
-            bd=0,
-            relief="flat",
-            font=("Segoe UI", 7),
-            width=3,
-            cursor="hand2",
-            command=self.toggle_saved_dropdown,
-        )
-        self.saved_arrow_btn.pack(side="right", fill="y")
+        self.tag_input.pack(side="left", fill="both", expand=True)
 
         self.tag_input.bind("<KeyRelease>", self._on_tag_input_key_release)
+        self.tag_input.bind("<<Paste>>", lambda e: self.after(10, self._on_tag_input_clipboard_modified))
+        self.tag_input.bind("<<Cut>>", lambda e: self.after(10, self._on_tag_input_clipboard_modified))
+        self.tag_input.bind("<Configure>", lambda e: self._update_tag_input_height())
+        self.tag_input.bind("<FocusIn>", self._on_tag_input_focus_in)
+        self.tag_input.bind("<FocusOut>", self._on_tag_input_focus_out)
         self.tag_input.bind("<Down>", self._focus_suggestion_down)
         self.tag_input.bind("<Up>", self._focus_suggestion_up)
         self.tag_input.bind("<Return>", self._on_tag_input_enter)
         self.tag_input.bind("<Shift-Return>", self._on_tag_input_shift_enter)
         self.tag_input.bind("<Tab>", self._on_tag_input_tab)
 
-        # Popups for Auto-Suggestions and Saved Searches (always positioned BELOW self.search_container)
+        # Popups for Auto-Suggestions, Saved Searches, and 2s Toast Notification (below self.search_container)
         self.suggest_dropdown = tk.Toplevel(self)
         self.suggest_dropdown.overrideredirect(True)
         self.suggest_dropdown.attributes("-alpha", 0.96)
@@ -4896,6 +5081,23 @@ class SettingsDialog(tk.Toplevel):
         self.saved_dropdown.attributes("-topmost", True)
         self.saved_dropdown.configure(bg=self.border_col)
         self.saved_dropdown.withdraw()
+
+        self.toast_popup = tk.Toplevel(self)
+        self.toast_popup.overrideredirect(True)
+        self.toast_popup.attributes("-alpha", 0.98)
+        self.toast_popup.attributes("-topmost", True)
+        self.toast_popup.configure(bg="#ffffff" if CURRENT_THEME == "dark" else "#005da6")
+        self.toast_popup.withdraw()
+        self.toast_label = tk.Label(
+            self.toast_popup,
+            text="",
+            fg="#ffffff",
+            bg="#d13438",
+            font=("Segoe UI", 9, "bold"),
+            padx=14,
+            pady=6,
+        )
+        self.toast_label.pack(fill="both", expand=True, padx=1, pady=1)
 
         # 3c. Permanent 4-Layer Scrollable Displayed Media Tags Box below TAGS search box
         self.media_tags_hdr_row = tk.Frame(search_inner, bg=self.bg_base)
@@ -5160,11 +5362,144 @@ class SettingsDialog(tk.Toplevel):
         )
         save_disp_btn.pack(side="right")
 
+        # Bind click-outside on Display tab background surfaces so clicking outside the Search TAGS box
+        # removes focus from self.tag_input (stops the vertical pipe cursor blinking) and triggers auto-search.
+        for bg_w in (
+            pad_frame,
+            screen_row,
+            scr_lbl,
+            enable_row,
+            self.search_subpanel,
+            search_inner,
+            self.search_controls_row,
+            self.status_label,
+            self.tag_search_row,
+            self.tag_label,
+            self.media_tags_hdr_row,
+            self.media_tags_hdr_lbl,
+            self.media_tags_post_lbl,
+            mode_row,
+            mode_lbl,
+            self.mode_sections_holder,
+            self.scroll_section_frame,
+            scroll_hdr,
+            dir_row,
+            dir_lbl,
+            self.polaroid_section_frame,
+            polaroid_hdr,
+            fill_row,
+            fill_lbl,
+            self.slideshow_section_frame,
+            slide_hdr,
+            slide_note,
+            self.masonry_section_frame,
+            masonry_hdr,
+            layout_row,
+            layout_lbl,
+            masonry_note,
+            btn_row,
+        ):
+            try:
+                bg_w.bind("<Button-1>", self._defocus_tag_input_on_outside_click, add="+")
+            except Exception:
+                pass
+
         self._load_screen_values_into_form(self._get_current_selected_screen_id())
 
     # -------------------------------------------------------------------------
-    # DANBOORU TAG COLORING, PER-SCREEN CONTROLS, SUGGESTIONS & 4-LAYER TAG BOX
+    # DANBOORU TAG COLORING, DYNAMIC HEIGHT SCALING, FOCUS-OUT AUTO-SEARCH,
+    # SAVED SEARCHES DROPDOWN & 4-LAYER DISPLAYED MEDIA TAGS BOX
     # -------------------------------------------------------------------------
+    def _defocus_tag_input_on_outside_click(self, event=None):
+        """Moves keyboard focus away from self.tag_input when clicking outside so the blinking caret stops and <FocusOut> triggers."""
+        if not self.is_open:
+            return
+        try:
+            if self.focus_get() == self.tag_input:
+                self.focus_set()
+            if self.saved_dropdown.winfo_viewable():
+                self._hide_saved_dropdown()
+            if self.suggest_dropdown.winfo_viewable():
+                self.hide_dropdown()
+        except tk.TclError:
+            pass
+
+    def _is_tag_input_focused(self) -> bool:
+        """Returns True if the vertical pipe cursor is currently active/blinking inside self.tag_input."""
+        if not self.is_open:
+            return False
+        try:
+            return self.focus_get() == self.tag_input
+        except tk.TclError:
+            return False
+
+    def _on_tag_input_focus_in(self, event=None):
+        """Called when the Search TAGS box gains focus (vertical pipe cursor starts blinking)."""
+        self._cancel_auto_tag_refresh_timer()
+        try:
+            if self.saved_dropdown.winfo_viewable():
+                self._hide_saved_dropdown()
+        except tk.TclError:
+            pass
+
+    def _on_tag_input_focus_out(self, event=None):
+        """
+        Called when the Search TAGS box loses focus (vertical pipe cursor stops blinking).
+        Waits briefly (120ms) to allow suggestion or saved-search clicks to complete, then
+        immediately runs the automatic search if tags were added or deleted.
+        """
+        if not self.is_open:
+            return
+        self._schedule_auto_tag_refresh(delay_ms=120)
+
+    def _update_tag_input_height(self):
+        """
+        Dynamically scales the height of the Search TAGS box (from 1 to 5 lines)
+        when there are many search tags or very long tags so typed tags are never hidden.
+        """
+        if not self.is_open:
+            return
+        try:
+            content = self.tag_input.get("1.0", "end-1c")
+            display_lines = 1
+            if content:
+                try:
+                    counted = self.tag_input.count("1.0", "end-1c", "displaylines")
+                    if counted:
+                        val = counted[0] if isinstance(counted, (tuple, list)) else int(counted)
+                        display_lines = int(val) + 1
+                except Exception:
+                    display_lines = 1
+
+                # Fallback character-wrap estimation when widget width is not yet mapped
+                w_px = self.tag_input.winfo_width()
+                chars_per_line = max(28, (w_px - 16) // 7) if w_px > 60 else 58
+                est_lines = max(1, (len(content) + chars_per_line - 1) // chars_per_line)
+                display_lines = max(display_lines, est_lines)
+
+            target_lines = max(1, min(5, display_lines))
+            current_height = int(self.tag_input.cget("height") or 1)
+            if current_height != target_lines:
+                self.tag_input.configure(height=target_lines)
+                base_h = 700
+                extra_h = (target_lines - 1) * 19
+                cur_w = max(650, self.winfo_width())
+                self.geometry(f"{cur_w}x{base_h + extra_h}")
+
+                # Keep open dropdowns anchored cleanly below the resized Search TAGS box
+                self.update_idletasks()
+                rx = self.search_container.winfo_rootx()
+                rw = self.search_container.winfo_width()
+                ry = self.search_container.winfo_rooty() + self.search_container.winfo_height() + 2
+                if self.suggest_dropdown.winfo_viewable():
+                    sh = self.suggest_dropdown.winfo_height()
+                    self.suggest_dropdown.geometry(f"{rw}x{sh}+{rx}+{ry}")
+                if self.saved_dropdown.winfo_viewable():
+                    svh = self.saved_dropdown.winfo_height()
+                    self.saved_dropdown.geometry(f"{rw}x{svh}+{rx}+{ry}")
+        except tk.TclError:
+            pass
+
     def _configure_danbooru_color_tags(self):
         """Configures Danbooru category text tags (0=General, 1=Artist, 3=Copyright, 4=Character, 5=Meta) on both Text widgets."""
         for cat_id in (0, 1, 3, 4, 5):
@@ -5197,6 +5532,7 @@ class SettingsDialog(tk.Toplevel):
             self.tag_input.delete("1.0", tk.END)
             self.tag_input.insert("1.0", clean)
             self._recolor_search_input_tags()
+            self._update_tag_input_height()
         except tk.TclError:
             pass
 
@@ -5231,7 +5567,11 @@ class SettingsDialog(tk.Toplevel):
                 else:
                     cat = cached_cat
 
-            self.tag_input.tag_add(f"cat_{cat}", f"1.{start_idx}", f"1.{end_idx}")
+            self.tag_input.tag_add(
+                f"cat_{cat}",
+                f"1.0 + {start_idx} chars",
+                f"1.0 + {end_idx} chars",
+            )
 
         if unknown_tokens:
             try:
@@ -5243,9 +5583,10 @@ class SettingsDialog(tk.Toplevel):
         sid = self._get_current_selected_screen_id()
         with DATA_LOCK:
             st = get_screen_runtime_state(sid)
-            is_paused = bool(st.get("paused", False))
+            is_paused = bool(st.get("wallpaper_paused", False))
         pal = THEME_PALETTES[CURRENT_THEME]
         if is_paused:
+            self.pause_btn_frame.configure(bg="#0067c0", highlightbackground=self.border_col)
             self.pause_btn.configure(
                 text="PAUSED",
                 bg="#0067c0",
@@ -5254,6 +5595,7 @@ class SettingsDialog(tk.Toplevel):
                 activeforeground="#ffffff",
             )
         else:
+            self.pause_btn_frame.configure(bg=pal["btn_bg"], highlightbackground=self.border_col)
             self.pause_btn.configure(
                 text="PAUSE",
                 bg=pal["btn_bg"],
@@ -5266,8 +5608,8 @@ class SettingsDialog(tk.Toplevel):
         sid = self._get_current_selected_screen_id()
         with DATA_LOCK:
             st = get_screen_runtime_state(sid)
-            st["paused"] = not bool(st.get("paused", False))
-            now_paused = st["paused"]
+            st["wallpaper_paused"] = not bool(st.get("wallpaper_paused", False))
+            now_paused = st["wallpaper_paused"]
         self._update_pause_btn_appearance()
         push_pause_states_to_webviews(sid)
         state_word = "paused" if now_paused else "resumed"
@@ -5310,8 +5652,40 @@ class SettingsDialog(tk.Toplevel):
         self.prev_btn.configure(fg=self.text_muted, cursor="arrow")
         self.after(1000, self._restore_nav_buttons_after_cooldown)
 
-    def apply_selected_screen_tags(self, force_refresh=False):
+    def _cancel_auto_tag_refresh_timer(self):
+        if self._auto_tag_refresh_job is not None:
+            try:
+                self.after_cancel(self._auto_tag_refresh_job)
+            except Exception:
+                pass
+            self._auto_tag_refresh_job = None
+
+    def _schedule_auto_tag_refresh(self, delay_ms=120):
+        """
+        Schedules an automatic search check ONLY when the Search TAGS box is no longer being typed in
+        (i.e. when the vertical pipe cursor is no longer blinking inside self.tag_input).
+        """
+        self._cancel_auto_tag_refresh_timer()
+        if not self.is_open:
+            return
+        self._auto_tag_refresh_job = self.after(delay_ms, self._execute_auto_tag_refresh)
+
+    def _execute_auto_tag_refresh(self):
+        self._auto_tag_refresh_job = None
+        if not self.is_open:
+            return
+        # Do not perform automatic search while the user's cursor is still blinking in the search box
+        if self._is_tag_input_focused():
+            return
+        sid = self._get_current_selected_screen_id()
+        current_query = normalize_tag_query(self._get_tag_input_value())
+        last_applied = self._last_applied_tags_by_screen.get(sid, "")
+        if canonical_pool_key(current_query) != canonical_pool_key(last_applied):
+            self.apply_selected_screen_tags(force_refresh=False, is_auto=True)
+
+    def apply_selected_screen_tags(self, force_refresh=False, is_auto=False):
         """Saves the TAGS input for the selected screen and populates/reuses its shared tag pool if the screen is enabled."""
+        self._cancel_auto_tag_refresh_timer()
         if self._debounce_timer:
             try:
                 self.after_cancel(self._debounce_timer)
@@ -5321,19 +5695,21 @@ class SettingsDialog(tk.Toplevel):
         self._suggest_req_id += 1
         self._hide_all_popups()
 
-        query = normalize_tag_query(self._get_tag_input_value())
-        if not query:
-            query = DEFAULT_TAGS
+        raw_input_val = self._get_tag_input_value()
+        query = normalize_tag_query(raw_input_val)
+        if not raw_input_val.strip() and not is_auto:
             self._set_tag_input_value(query)
         else:
             self._recolor_search_input_tags()
+            self._update_tag_input_height()
 
         sid = self._get_current_selected_screen_id()
+        self._last_applied_tags_by_screen[sid] = query
         self.save_display_settings(clamp_entries=False)
 
         pal = THEME_PALETTES[CURRENT_THEME]
         try:
-            if force_refresh:
+            if force_refresh or is_auto:
                 self.refresh_btn.configure(fg="#0067c0")
             self.tag_input.configure(bg=pal["flash_bg"])
             self.after(
@@ -5350,7 +5726,12 @@ class SettingsDialog(tk.Toplevel):
 
         if self.screen_enabled_var.get():
             ensure_screen_tag_pool_populated_async(sid, force_reset=force_refresh)
-            action_lbl = "Immediate refresh" if force_refresh else "Applied search tags"
+            if is_auto:
+                action_lbl = "Auto-searched tags on focus-out (cursor stopped blinking)"
+            elif force_refresh:
+                action_lbl = "Immediate refresh"
+            else:
+                action_lbl = "Applied search tags"
             log_event("search", f"{action_lbl} on {sid}: '{query}'")
         else:
             log_event("search", f"Saved search tags for disabled {sid} (no media fetch while unchecked): '{query}'")
@@ -5384,11 +5765,24 @@ class SettingsDialog(tk.Toplevel):
         except tk.TclError:
             return ""
 
+    def _on_tag_input_clipboard_modified(self):
+        if not self.is_open:
+            return
+        self._recolor_search_input_tags()
+        self._update_tag_input_height()
+        if not self._is_tag_input_focused():
+            self._schedule_auto_tag_refresh(120)
+
     def _on_tag_input_key_release(self, event):
-        if event.keysym in ("Up", "Down", "Return", "Shift_L", "Shift_R", "Escape", "Left", "Right", "Tab"):
+        if event.keysym in (
+            "Up", "Down", "Return", "Shift_L", "Shift_R",
+            "Control_L", "Control_R", "Alt_L", "Alt_R",
+            "Escape", "Left", "Right", "Tab",
+        ):
             return
 
         self._recolor_search_input_tags()
+        self._update_tag_input_height()
 
         if self._debounce_timer:
             try:
@@ -5461,12 +5855,71 @@ class SettingsDialog(tk.Toplevel):
             pass
         self.selected_index = -1
 
-    def _hide_all_popups(self):
-        self.hide_dropdown()
+    def _stop_saved_dropdown_marquee(self):
+        if self._saved_marquee_job is not None:
+            try:
+                self.after_cancel(self._saved_marquee_job)
+            except Exception:
+                pass
+            self._saved_marquee_job = None
+        self._saved_marquee_items = []
+
+    def _hide_saved_dropdown(self):
+        self._stop_saved_dropdown_marquee()
         try:
             self.saved_dropdown.withdraw()
         except tk.TclError:
             pass
+
+    def _hide_toast_popup(self):
+        if self._toast_hide_job is not None:
+            try:
+                self.after_cancel(self._toast_hide_job)
+            except Exception:
+                pass
+            self._toast_hide_job = None
+        try:
+            self.toast_popup.withdraw()
+        except tk.TclError:
+            pass
+
+    def _show_saved_search_toast(self, message="Saved Search Tags already exists", duration_ms=2000):
+        """Displays a brief floating popup toast for 2 seconds when Save Search Tags is pressed for an existing query."""
+        if not self.is_open:
+            return
+        if self._toast_hide_job is not None:
+            try:
+                self.after_cancel(self._toast_hide_job)
+            except Exception:
+                pass
+            self._toast_hide_job = None
+
+        try:
+            self.toast_popup.configure(bg="#ffffff" if CURRENT_THEME == "dark" else "#005da6")
+            self.toast_label.configure(
+                text=f"⚠  {message}",
+                fg="#ffffff",
+                bg="#2b2b36" if CURRENT_THEME == "dark" else "#0067c0",
+            )
+            self.update_idletasks()
+            btn_rx = self.saved_searches_btn_frame.winfo_rootx()
+            btn_ry = self.saved_searches_btn_frame.winfo_rooty()
+            btn_rw = self.saved_searches_btn_frame.winfo_width()
+            req_w = max(240, self.toast_label.winfo_reqwidth() + 8)
+            req_h = max(30, self.toast_label.winfo_reqheight() + 4)
+            tx = btn_rx + max(0, (btn_rw - req_w) // 2)
+            ty = max(10, btn_ry - req_h - 4)
+            self.toast_popup.geometry(f"{req_w}x{req_h}+{tx}+{ty}")
+            self.toast_popup.deiconify()
+            self.toast_popup.lift()
+            self._toast_hide_job = self.after(duration_ms, self._hide_toast_popup)
+        except tk.TclError:
+            pass
+
+    def _hide_all_popups(self):
+        self.hide_dropdown()
+        self._hide_saved_dropdown()
+        self._hide_toast_popup()
 
     def _highlight_suggestion_index(self, index):
         self.selected_index = index
@@ -5521,27 +5974,88 @@ class SettingsDialog(tk.Toplevel):
 
         self.tag_input.delete("1.0", tk.END)
         self.tag_input.insert("1.0", combined)
-        self.tag_input.mark_set(tk.INSERT, f"1.{len(new_before)}")
+        self.tag_input.mark_set(tk.INSERT, f"1.0 + {len(new_before)} chars")
+        self.tag_input.focus_set()
         self._recolor_search_input_tags()
+        self._update_tag_input_height()
         self.hide_dropdown()
 
     def toggle_saved_dropdown(self):
         if self.saved_dropdown.winfo_viewable():
-            self.saved_dropdown.withdraw()
+            self._hide_saved_dropdown()
             return
         self.hide_dropdown()
         self.render_saved_dropdown()
 
+    def _render_tokens_on_saved_canvas(self, canvas_widget, query_text, start_x):
+        """Draws each space-separated tag token onto canvas_widget with its Danbooru category color and returns the ending x coordinate."""
+        cur_x = start_x
+        tokens = [t for t in str(query_text or "").split(" ") if t]
+        for tok in tokens:
+            core = tok.lstrip("-~").lower()
+            if ":" in core:
+                cat = 5
+            else:
+                cat = lookup_cached_tag_category(core, default=0)
+            col = get_danbooru_tag_color(cat if cat in (0, 1, 3, 4, 5) else 0, CURRENT_THEME)
+            item_id = canvas_widget.create_text(
+                cur_x,
+                13,
+                text=tok,
+                anchor="w",
+                fill=col,
+                font=("Segoe UI", 9, "bold"),
+                tags=("marquee_tok",),
+            )
+            bbox = canvas_widget.bbox(item_id)
+            tok_w = (bbox[2] - bbox[0]) if bbox else (len(tok) * 7)
+            cur_x += tok_w + 8
+        return max(cur_x - 8, start_x)
+
+    def _tick_saved_dropdown_marquee(self):
+        """Continuously loop-scrolls long saved search rows horizontally while the Saved Searches dropdown is open."""
+        self._saved_marquee_job = None
+        if not self.is_open or not self.saved_dropdown.winfo_viewable():
+            return
+
+        step_px = 1.4
+        active_items = []
+        for entry in self._saved_marquee_items:
+            cv = entry["canvas"]
+            cycle_px = entry["cycle_px"]
+            try:
+                if not cv.winfo_exists():
+                    continue
+                cv.move("marquee_tok", -step_px, 0)
+                entry["offset"] += step_px
+                if entry["offset"] >= cycle_px:
+                    cv.move("marquee_tok", cycle_px, 0)
+                    entry["offset"] -= cycle_px
+                active_items.append(entry)
+            except tk.TclError:
+                continue
+
+        self._saved_marquee_items = active_items
+        if self._saved_marquee_items:
+            self._saved_marquee_job = self.after(35, self._tick_saved_dropdown_marquee)
+
     def render_saved_dropdown(self):
+        self._stop_saved_dropdown_marquee()
         for widget in self.saved_dropdown.winfo_children():
             widget.destroy()
+
+        self.update_idletasks()
+        rx = self.search_container.winfo_rootx()
+        rw = max(320, self.search_container.winfo_width())
+        ry = self.search_container.winfo_rooty() + self.search_container.winfo_height() + 2
 
         pal = THEME_PALETTES[CURRENT_THEME]
         accent_fg = "#4da3ff" if CURRENT_THEME == "dark" else "#0067c0"
 
+        # 1d) First option at top of Saved Searches dropdown: "Save Search Tags"
         save_btn = tk.Label(
             self.saved_dropdown,
-            text="💾 Save Current Screen Search",
+            text="Save Search Tags",
             anchor="w",
             fg=accent_fg,
             bg=self.input_bg,
@@ -5568,83 +6082,126 @@ class SettingsDialog(tk.Toplevel):
             )
             empty_lbl.pack(fill="x", padx=1, pady=1)
         else:
+            avail_text_w = max(180, rw - 52)
             for item in self.saved_list:
-                row = tk.Frame(self.saved_dropdown, bg=self.input_bg)
+                row = tk.Frame(self.saved_dropdown, bg=self.input_bg, height=28)
                 row.pack(fill="x", padx=1, pady=1)
+                row.pack_propagate(False)
 
-                first_tok = item.split()[0].lstrip("-~") if item.split() else ""
-                tok_cat = lookup_cached_tag_category(first_tok)
-                item_col = get_danbooru_tag_color(tok_cat if tok_cat is not None else 0, CURRENT_THEME)
-
-                item_lbl = tk.Label(
-                    row,
-                    text=item,
-                    anchor="w",
-                    fg=item_col,
-                    bg=self.input_bg,
-                    font=("Segoe UI", 9, "bold"),
-                    padx=10,
-                    pady=4,
-                    cursor="hand2",
-                )
-                item_lbl.pack(side="left", fill="x", expand=True)
-
+                # 1c) Small trash-can delete button on the right of each saved search row (packed FIRST so never clipped)
                 del_btn = tk.Label(
                     row,
-                    text=" - ",
+                    text="🗑",
                     fg="#ff5f5f" if CURRENT_THEME == "dark" else "#d83b01",
                     bg=self.input_bg,
                     font=("Segoe UI", 10, "bold"),
                     padx=8,
                     cursor="hand2",
                 )
-                del_btn.pack(side="right")
+                del_btn.pack(side="right", fill="y")
 
-                item_lbl.bind(
+                text_canvas = tk.Canvas(
+                    row,
+                    bg=self.input_bg,
+                    height=26,
+                    bd=0,
+                    highlightthickness=0,
+                    cursor="hand2",
+                )
+                text_canvas.pack(side="left", fill="both", expand=True, padx=(8, 2))
+
+                end_x = self._render_tokens_on_saved_canvas(text_canvas, item, 2)
+                text_w = end_x - 2
+
+                # If the saved search tags are too long to fit on the line, continuously loop-scroll
+                if text_w > avail_text_w:
+                    gap_px = 56
+                    cycle_px = text_w + gap_px
+                    sep_col = self.text_muted
+                    text_canvas.create_text(
+                        2 + text_w + (gap_px // 2),
+                        13,
+                        text="•",
+                        anchor="center",
+                        fill=sep_col,
+                        font=("Segoe UI", 9, "bold"),
+                        tags=("marquee_tok",),
+                    )
+                    self._render_tokens_on_saved_canvas(text_canvas, item, 2 + cycle_px)
+                    self._saved_marquee_items.append(
+                        {
+                            "canvas": text_canvas,
+                            "cycle_px": float(cycle_px),
+                            "offset": 0.0,
+                        }
+                    )
+
+                text_canvas.bind(
                     "<Enter>",
-                    lambda e, r=row, d=del_btn, il=item_lbl: (
+                    lambda e, r=row, d=del_btn, cv=text_canvas: (
                         r.configure(bg=pal["row_hover"]),
-                        il.configure(bg=pal["row_hover"]),
+                        cv.configure(bg=pal["row_hover"]),
                         d.configure(bg=pal["row_hover"]),
                     ),
                 )
-                item_lbl.bind(
+                text_canvas.bind(
                     "<Leave>",
-                    lambda e, r=row, d=del_btn, il=item_lbl: (
+                    lambda e, r=row, d=del_btn, cv=text_canvas: (
                         r.configure(bg=self.input_bg),
-                        il.configure(bg=self.input_bg),
+                        cv.configure(bg=self.input_bg),
                         d.configure(bg=self.input_bg),
                     ),
                 )
-                item_lbl.bind("<Button-1>", lambda e, text=item: self.apply_saved_search(text))
+                text_canvas.bind("<Button-1>", lambda e, text=item: self.apply_saved_search(text))
 
-                del_btn.bind("<Enter>", lambda e, d=del_btn: d.configure(bg=pal["row_hover"]))
-                del_btn.bind("<Leave>", lambda e, d=del_btn: d.configure(bg=self.input_bg))
+                del_btn.bind(
+                    "<Enter>",
+                    lambda e, d=del_btn: d.configure(
+                        bg="#c42b1c",
+                        fg="#ffffff",
+                    ),
+                )
+                del_btn.bind(
+                    "<Leave>",
+                    lambda e, d=del_btn: d.configure(
+                        bg=self.input_bg,
+                        fg="#ff5f5f" if CURRENT_THEME == "dark" else "#d83b01",
+                    ),
+                )
                 del_btn.bind("<Button-1>", lambda e, text=item: self.delete_saved_search(text))
 
-        self.update_idletasks()
-        rx = self.search_container.winfo_rootx()
-        rw = self.search_container.winfo_width()
-        ry = self.search_container.winfo_rooty() + self.search_container.winfo_height() + 2
-
         item_count = max(1, len(self.saved_list))
-        calc_height = 36 + (item_count * 28) + 4
+        calc_height = 36 + (item_count * 30) + 4
 
         self.saved_dropdown.geometry(f"{rw}x{calc_height}+{rx}+{ry}")
         self.saved_dropdown.deiconify()
         self.saved_dropdown.lift()
 
+        if self._saved_marquee_items:
+            self._saved_marquee_job = self.after(35, self._tick_saved_dropdown_marquee)
+
     def save_current_search(self):
         query = normalize_tag_query(self._get_tag_input_value())
-        if query and query not in self.saved_list:
-            self.saved_list.insert(0, query)
-            store_saved_searches(self.saved_list)
-            log_event("search", f"Saved query to bookmarks: '{query}'")
+        if not query:
+            return
+        already_exists = any(
+            canonical_pool_key(existing) == canonical_pool_key(query)
+            or existing.strip().lower() == query.strip().lower()
+            for existing in self.saved_list
+        )
+        if already_exists:
+            self._show_saved_search_toast("Saved Search Tags already exists", duration_ms=2000)
+            log_event("search", f"Save Search Tags skipped (already exists): '{query}'")
+            return
+
+        self.saved_list.insert(0, query)
+        store_saved_searches(self.saved_list)
+        log_event("search", f"Saved search to bookmarks via Save Search Tags: '{query}'")
         self.render_saved_dropdown()
 
     def apply_saved_search(self, saved_tags):
         self._set_tag_input_value(saved_tags)
-        self.saved_dropdown.withdraw()
+        self._hide_saved_dropdown()
         self.apply_selected_screen_tags(force_refresh=False)
 
     def delete_saved_search(self, target_tags):
@@ -5655,7 +6212,11 @@ class SettingsDialog(tk.Toplevel):
         self.render_saved_dropdown()
 
     def _append_tag_to_search_input(self, tag_name):
-        """Appends a clicked tag from the permanent 4-layer Displayed Media Tags box into the selected screen's TAGS search bar."""
+        """
+        Appends a clicked tag from the permanent 4-layer Displayed Media Tags box into the selected screen's TAGS search bar.
+        If the Search TAGS box is not currently being typed in (cursor not blinking inside it), triggers auto-search immediately;
+        otherwise waits until the cursor stops blinking in the Search TAGS box.
+        """
         clean_tag = str(tag_name or "").strip()
         if not clean_tag:
             return
@@ -5664,8 +6225,20 @@ class SettingsDialog(tk.Toplevel):
         if clean_tag.lower() not in existing_tokens:
             updated = f"{current} {clean_tag}".strip() if current else clean_tag
             self._set_tag_input_value(updated)
-            self.apply_selected_screen_tags(force_refresh=False)
-            log_event("search", f"Added media tag '{clean_tag}' to {self._get_current_selected_screen_id()} search bar.")
+            if not self._is_tag_input_focused():
+                self.apply_selected_screen_tags(force_refresh=False, is_auto=True)
+            else:
+                log_event(
+                    "search",
+                    f"Added media tag '{clean_tag}' to {self._get_current_selected_screen_id()} search bar (waiting for focus-out to auto-search).",
+                )
+
+    def on_screen_media_displayed(self, screen_id, post_id, tags_list=None):
+        """Called immediately when a screen WebView reports a newly displayed media item."""
+        if not self.is_open:
+            return
+        if screen_id == self._get_current_selected_screen_id():
+            self._render_displayed_media_tags_box(force=True)
 
     def _render_displayed_media_tags_box(self, force=False):
         """Renders all tags of the selected screen's most recently displayed media in the permanent 4-layer scrollable box."""
@@ -5679,7 +6252,16 @@ class SettingsDialog(tk.Toplevel):
             if not tags_list and post_id and post_id in POST_TAGS_CACHE:
                 tags_list = list(POST_TAGS_CACHE[post_id])
 
-        tags_sig = (len(tags_list), tags_list[0][0] if tags_list else "")
+        resolved_tags = []
+        for t_name, t_cat in tags_list:
+            cat = t_cat if t_cat in (0, 1, 3, 4, 5) else 0
+            if cat == 0:
+                cached = lookup_cached_tag_category(t_name, default=0)
+                if cached in (1, 3, 4, 5):
+                    cat = cached
+            resolved_tags.append((t_name, cat))
+
+        tags_sig = (len(resolved_tags), tuple(resolved_tags[:25]))
         if (
             not force
             and sid == self._last_rendered_screen_id
@@ -5697,11 +6279,11 @@ class SettingsDialog(tk.Toplevel):
             self.media_tags_text.delete("1.0", tk.END)
 
             if post_id:
-                self.media_tags_post_lbl.configure(text=f"Post #{post_id} ({len(tags_list)} tags)")
+                self.media_tags_post_lbl.configure(text=f"Post #{post_id} ({len(resolved_tags)} tags)")
             else:
                 self.media_tags_post_lbl.configure(text="")
 
-            if not tags_list:
+            if not resolved_tags:
                 msg = (
                     "Screen display is currently unchecked — enable screen to fetch and display media tags."
                     if not self.screen_enabled_var.get()
@@ -5709,7 +6291,7 @@ class SettingsDialog(tk.Toplevel):
                 )
                 self.media_tags_text.insert(tk.END, msg, ("empty_hint",))
             else:
-                for idx, (t_name, t_cat) in enumerate(tags_list):
+                for idx, (t_name, t_cat) in enumerate(resolved_tags):
                     click_tag = f"media_tag_click_{idx}"
                     cat_tag = f"cat_{t_cat if t_cat in (0, 1, 3, 4, 5) else 0}"
                     self.media_tags_text.insert(tk.END, t_name, (cat_tag, click_tag))
@@ -5728,7 +6310,7 @@ class SettingsDialog(tk.Toplevel):
                         "<Leave>",
                         lambda e: self.media_tags_text.configure(cursor="arrow"),
                     )
-                    if idx < len(tags_list) - 1:
+                    if idx < len(resolved_tags) - 1:
                         self.media_tags_text.insert(tk.END, "   ")
 
             self.media_tags_text.configure(state="disabled")
@@ -5742,67 +6324,55 @@ class SettingsDialog(tk.Toplevel):
         sid = self._get_current_selected_screen_id()
         sc_enabled = bool(self.screen_enabled_var.get())
         query = normalize_tag_query(self._get_tag_input_value())
-        pool_key = canonical_pool_key(query)
 
         with DATA_LOCK:
             st = get_screen_runtime_state(sid)
-            scr_paused = bool(st.get("paused", False))
-            pool = get_or_create_tag_pool_locked(pool_key, query)
+            scr_paused = bool(st.get("wallpaper_paused", False))
+            _, pool = get_or_create_tag_pool_locked(query)
             p_status = dict(pool.get("last_status") or {})
-            buf_len = len(pool.get("buffer") or [])
+            buf_len = len(pool.get("posts") or [])
             is_fetching = bool(pool.get("is_fetching", False))
 
         try:
             pal = THEME_PALETTES[CURRENT_THEME]
             if APP_PAUSED:
-                self.status_label.configure(
-                    text="⏸ App Paused",
-                    fg="#ff8080" if CURRENT_THEME == "dark" else "#a80000",
-                    bg="#3d1a1e" if CURRENT_THEME == "dark" else "#fde7e9",
-                )
+                bg_c = "#3d1a1e" if CURRENT_THEME == "dark" else "#fde7e9"
+                fg_c = "#ff8080" if CURRENT_THEME == "dark" else "#a80000"
+                txt = "⏸ App Paused"
             elif not sc_enabled:
-                self.status_label.configure(
-                    text="○ Screen Disabled (No Fetch)",
-                    fg=self.text_muted,
-                    bg=pal["btn_bg"],
-                )
+                bg_c = pal["btn_bg"]
+                fg_c = self.text_muted
+                txt = "○ Screen Disabled"
             elif scr_paused:
-                self.status_label.configure(
-                    text="⏸ Screen Paused",
-                    fg="#4da3ff" if CURRENT_THEME == "dark" else "#0067c0",
-                    bg=pal["btn_bg"],
-                )
+                bg_c = pal["btn_bg"]
+                fg_c = "#4da3ff" if CURRENT_THEME == "dark" else "#0067c0"
+                txt = "⏸ Screen Paused"
             elif is_fetching and buf_len == 0:
-                self.status_label.configure(
-                    text="⟳ Fetching tags...",
-                    fg="#4da3ff" if CURRENT_THEME == "dark" else "#0067c0",
-                    bg=pal["btn_bg"],
-                )
+                bg_c = pal["btn_bg"]
+                fg_c = "#4da3ff" if CURRENT_THEME == "dark" else "#0067c0"
+                txt = "⟳ Fetching tags..."
             elif p_status.get("status") == "ok" or buf_len > 0:
                 page = p_status.get("page", 1)
-                self.status_label.configure(
-                    text=f"✔ P:{page} ({buf_len} pooled)",
-                    fg="#6ccb5f" if CURRENT_THEME == "dark" else "#0f7b0f",
-                    bg="#18331a" if CURRENT_THEME == "dark" else "#dff6dd",
-                )
+                bg_c = "#18331a" if CURRENT_THEME == "dark" else "#dff6dd"
+                fg_c = "#6ccb5f" if CURRENT_THEME == "dark" else "#0f7b0f"
+                txt = f"✔ P:{page} ({buf_len} pooled)"
             elif p_status.get("status") == "error":
-                self.status_label.configure(
-                    text="✖ API Error",
-                    fg="#ff8080" if CURRENT_THEME == "dark" else "#a80000",
-                    bg="#3d1a1e" if CURRENT_THEME == "dark" else "#fde7e9",
-                )
+                bg_c = "#3d1a1e" if CURRENT_THEME == "dark" else "#fde7e9"
+                fg_c = "#ff8080" if CURRENT_THEME == "dark" else "#a80000"
+                txt = "✖ API Error"
             else:
-                self.status_label.configure(
-                    text="● Ready",
-                    fg=self.text_muted,
-                    bg=pal["btn_bg"],
-                )
+                bg_c = pal["btn_bg"]
+                fg_c = self.text_muted
+                txt = "● Ready"
+
+            self.status_frame.configure(bg=bg_c)
+            self.status_label.configure(text=txt, fg=fg_c, bg=bg_c)
 
             self._render_displayed_media_tags_box(force=False)
         except tk.TclError:
             return
 
-        self._status_poll_job = self.after(500, self._poll_display_status)
+        self._status_poll_job = self.after(400, self._poll_display_status)
 
     def _update_mode_sections_visibility(self):
         """Hides all display mode settings sections except the currently selected display mode."""
@@ -6006,6 +6576,7 @@ class SettingsDialog(tk.Toplevel):
         return self.screen_map.get(lbl, "screen_1")
 
     def _on_screen_selection_changed(self, event=None):
+        self._cancel_auto_tag_refresh_timer()
         self._hide_all_popups()
         sid = self._get_current_selected_screen_id()
         self._load_screen_values_into_form(sid)
@@ -6032,6 +6603,7 @@ class SettingsDialog(tk.Toplevel):
         props = sc_cfg["properties"]
 
         tags_val = normalize_tag_query(props.get("searchtags", {}).get("value", DEFAULT_TAGS))
+        self._last_applied_tags_by_screen[screen_id] = tags_val
         self._set_tag_input_value(tags_val)
 
         mode_val = _normalize_display_mode_value(props.get("displaymode", {}).get("value", "scroll"))
@@ -6155,9 +6727,13 @@ class SettingsDialog(tk.Toplevel):
         with DATA_LOCK:
             st = get_screen_runtime_state(sid)
             st["tags"] = new_tags
-            st["pool_key"] = canonical_pool_key(new_tags)
-            get_or_create_tag_pool_locked(st["pool_key"], new_tags)
+            pkey, _ = get_or_create_tag_pool_locked(new_tags)
+            st["pool_key"] = pkey
+            if tags_changed:
+                st["epoch"] += 1
+                st["seen_post_ids"].clear()
 
+        self._last_applied_tags_by_screen[sid] = new_tags
         store_project_json(project_data)
         push_properties_to_webview(sid, sync_geometry=enabled_changed)
         if new_enabled and (enabled_changed or tags_changed):
@@ -6258,17 +6834,11 @@ class SettingsDialog(tk.Toplevel):
 
         self.configure(bg=self.border_col)
         try:
-            self.style.configure("TNotebook", background=self.bg_base, borderwidth=0)
-            self.style.configure(
-                "TNotebook.Tab",
-                font=("Segoe UI", 9, "bold"),
-                padding=(14, 5),
-                background=pal["btn_bg"],
-                foreground="#1c1c1c",
-            )
             self.style.configure("Display.Horizontal.TScale", background=self.bg_base)
         except Exception:
             pass
+
+        self._update_settings_tabs_theme()
 
         for frm in self._themed_frames:
             try:
@@ -6283,6 +6853,7 @@ class SettingsDialog(tk.Toplevel):
                 pass
 
         self.container.configure(bg=self.bg_base, highlightbackground=self.border_col)
+        self.tab_content_holder.configure(bg=self.bg_base, highlightbackground=self.border_col)
         self.cred_sep.configure(bg=self.border_col)
         self.disp_sep.configure(bg=self.border_col)
 
@@ -6325,22 +6896,26 @@ class SettingsDialog(tk.Toplevel):
             selectcolor=self.input_bg,
         )
 
-        # Update Display tab search & playback controls theme
+        # Update Display tab search & playback controls theme (all standardized height=28)
+        self.status_frame.configure(highlightbackground=self.border_col)
+        self.saved_searches_btn_frame.configure(bg=pal["btn_bg"], highlightbackground=self.border_col)
+        self.saved_searches_btn.configure(
+            bg=pal["btn_bg"],
+            fg=self.text_dark,
+            activebackground=pal["btn_active"],
+            activeforeground=self.text_dark,
+        )
+        self.refresh_btn_frame.configure(bg=pal["btn_bg"], highlightbackground=self.border_col)
         self.refresh_btn.configure(bg=pal["btn_bg"], fg=self.text_dark, activebackground=pal["btn_active"])
         self.prev_btn_frame.configure(bg=pal["btn_bg"], highlightbackground=self.border_col)
         self.prev_btn.configure(bg=pal["btn_bg"], fg=self.text_dark, activebackground=pal["btn_active"])
         self.next_btn_frame.configure(bg=pal["btn_bg"], highlightbackground=self.border_col)
         self.next_btn.configure(bg=pal["btn_bg"], fg=self.text_dark, activebackground=pal["btn_active"])
+        self.pause_btn_frame.configure(highlightbackground=self.border_col)
         self._update_pause_btn_appearance()
 
         self.search_container.configure(bg=self.input_bg, highlightbackground=self.border_col)
         self.tag_input.configure(bg=self.input_bg, fg=self.text_dark, insertbackground=self.text_dark)
-        self.saved_arrow_btn.configure(
-            bg=pal["arrow_bg"],
-            fg=self.text_muted,
-            activebackground=pal["btn_active"],
-            activeforeground=self.text_dark,
-        )
         self.suggest_dropdown.configure(bg=self.border_col)
         self.saved_dropdown.configure(bg=self.border_col)
         if self.saved_dropdown.winfo_viewable():
@@ -6402,7 +6977,7 @@ class SettingsDialog(tk.Toplevel):
 
     def _on_escape_pressed(self, event=None):
         if self.saved_dropdown.winfo_viewable():
-            self.saved_dropdown.withdraw()
+            self._hide_saved_dropdown()
             return "break"
         if self.suggest_dropdown.winfo_viewable():
             self.hide_dropdown()
@@ -6443,6 +7018,9 @@ class SettingsDialog(tk.Toplevel):
             store_app_config(cfg)
         except Exception:
             pass
+        self._cancel_auto_tag_refresh_timer()
+        self._stop_saved_dropdown_marquee()
+        self._hide_toast_popup()
         if getattr(self, "_live_apply_job", None):
             try:
                 self.after_cancel(self._live_apply_job)
@@ -6467,6 +7045,7 @@ class SettingsDialog(tk.Toplevel):
         try:
             self.suggest_dropdown.destroy()
             self.saved_dropdown.destroy()
+            self.toast_popup.destroy()
         except Exception:
             pass
         if GLOSSARY_DIALOG_INSTANCE and getattr(GLOSSARY_DIALOG_INSTANCE, "is_open", False):

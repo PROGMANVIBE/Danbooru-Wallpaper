@@ -359,9 +359,11 @@
     function recordShownMedia(readyItem) {
       if (!readyItem || !readyItem.url) return;
       const postId = Number(readyItem.postId) || 0;
+      const tagsStr = String(readyItem.tags || '');
       const snapshot = {
         url: readyItem.url,
         postId: postId,
+        tags: tagsStr,
         isVideo: Boolean(readyItem.isVideo),
         isAnimated: Boolean(readyItem.isAnimated),
         isGif: Boolean(readyItem.isGif),
@@ -378,9 +380,10 @@
       }
       currentDisplayedDesc = snapshot;
 
-      if (postId > 0) {
+      if (postId > 0 || tagsStr) {
         fetch(
-          `${LOCAL_ORIGIN}/report_shown?screen=${encodeURIComponent(SCREEN_ID)}&post_id=${encodeURIComponent(postId)}`
+          `${LOCAL_ORIGIN}/report_shown?screen=${encodeURIComponent(SCREEN_ID)}&post_id=${encodeURIComponent(postId)}&tags=${encodeURIComponent(tagsStr)}&_t=${Date.now()}`,
+          { method: 'GET', cache: 'no-store', keepalive: true }
         ).catch(() => {});
       }
     }
@@ -775,6 +778,7 @@
             media: video,
             url: desc.url,
             postId: Number(desc.postId) || 0,
+            tags: String(desc.tags || ''),
             isVideo: true,
             isAnimated: true,
             isGif: false,
@@ -799,6 +803,7 @@
             media: img,
             url: desc.url,
             postId: Number(desc.postId) || 0,
+            tags: String(desc.tags || ''),
             isVideo: false,
             isAnimated: Boolean(desc.isAnimated),
             isGif: Boolean(desc.isGif),
@@ -921,7 +926,7 @@
       }
     }
 
-    function finalizePreloadedMedia(mediaEl, localMediaUrl, gen, isVideo, isAnimated, isGif, gifLoopDurationSec, postId = 0) {
+    function finalizePreloadedMedia(mediaEl, localMediaUrl, gen, isVideo, isAnimated, isGif, gifLoopDurationSec, postId = 0, postTags = '') {
       if (!inFlightMedia.has(mediaEl)) return;
       inFlightMedia.delete(mediaEl);
       activePreloadCount = Math.max(0, activePreloadCount - 1);
@@ -952,6 +957,7 @@
         media: mediaEl,
         url: localMediaUrl,
         postId: Number(postId) || 0,
+        tags: String(postTags || ''),
         isVideo: isVideo,
         isAnimated: isAnimated,
         isGif: Boolean(isGif),
@@ -1025,6 +1031,7 @@
         if (!localMediaUrl) continue;
 
         const postId = Number(post.id || 0);
+        const postTags = String(post.tag_string || post.tags || '');
         const ext = String(post.file_ext || '').toLowerCase();
         const isVideo = (ext === 'mp4') || localMediaUrl.toLowerCase().includes('ext=mp4');
         const isGif = !isVideo && ((ext === 'gif') || localMediaUrl.toLowerCase().includes('ext=gif'));
@@ -1048,7 +1055,7 @@
             video.oncanplay = null;
             video.onerror = null;
             const durSec = (Number.isFinite(video.duration) && video.duration > 0) ? video.duration : 3.0;
-            finalizePreloadedMedia(video, localMediaUrl, gen, true, true, false, durSec, postId);
+            finalizePreloadedMedia(video, localMediaUrl, gen, true, true, false, durSec, postId, postTags);
           };
 
           video.onloadeddata = onReady;
@@ -1080,14 +1087,14 @@
               const blobUrl = URL.createObjectURL(new Blob([buf], { type: 'image/gif' }));
               img.dataset.blobUrl = blobUrl;
               img.onload = () => {
-                finalizePreloadedMedia(img, localMediaUrl, gen, false, true, true, loopSec, postId);
+                finalizePreloadedMedia(img, localMediaUrl, gen, false, true, true, loopSec, postId, postTags);
               };
               img.onerror = () => handleMediaLoadFailure(img);
               img.src = blobUrl;
             })
             .catch(() => {
               img.onload = () => {
-                finalizePreloadedMedia(img, localMediaUrl, gen, false, true, true, 2.5, postId);
+                finalizePreloadedMedia(img, localMediaUrl, gen, false, true, true, 2.5, postId, postTags);
               };
               img.onerror = () => handleMediaLoadFailure(img);
               img.src = localMediaUrl;
@@ -1123,7 +1130,7 @@
                   downscaleScratchCanvas.height = 1;
                   isDownscaleCanvasBusy = false;
                   if (!blob || !inFlightMedia.has(img)) {
-                    finalizePreloadedMedia(img, localMediaUrl, gen, false, false, false, 0, postId);
+                    finalizePreloadedMedia(img, localMediaUrl, gen, false, false, false, 0, postId, postTags);
                     return;
                   }
                   const blobUrl = URL.createObjectURL(blob);
@@ -1136,10 +1143,10 @@
                   scaledImg.onload = () => {
                     if (typeof scaledImg.decode === 'function') {
                       scaledImg.decode()
-                        .then(() => finalizePreloadedMedia(scaledImg, localMediaUrl, gen, false, false, false, 0, postId))
-                        .catch(() => finalizePreloadedMedia(scaledImg, localMediaUrl, gen, false, false, false, 0, postId));
+                        .then(() => finalizePreloadedMedia(scaledImg, localMediaUrl, gen, false, false, false, 0, postId, postTags))
+                        .catch(() => finalizePreloadedMedia(scaledImg, localMediaUrl, gen, false, false, false, 0, postId, postTags));
                     } else {
-                      finalizePreloadedMedia(scaledImg, localMediaUrl, gen, false, false, false, 0, postId);
+                      finalizePreloadedMedia(scaledImg, localMediaUrl, gen, false, false, false, 0, postId, postTags);
                     }
                   };
                   scaledImg.onerror = () => handleMediaLoadFailure(scaledImg);
@@ -1155,10 +1162,10 @@
 
             if (typeof img.decode === 'function') {
               img.decode()
-                .then(() => finalizePreloadedMedia(img, localMediaUrl, gen, false, false, false, 0, postId))
-                .catch(() => finalizePreloadedMedia(img, localMediaUrl, gen, false, false, false, 0, postId));
+                .then(() => finalizePreloadedMedia(img, localMediaUrl, gen, false, false, false, 0, postId, postTags))
+                .catch(() => finalizePreloadedMedia(img, localMediaUrl, gen, false, false, false, 0, postId, postTags));
             } else {
-              finalizePreloadedMedia(img, localMediaUrl, gen, false, false, false, 0, postId);
+              finalizePreloadedMedia(img, localMediaUrl, gen, false, false, false, 0, postId, postTags);
             }
           };
 
@@ -1370,6 +1377,10 @@
         activeItems.push({
           element: media,
           mediaElement: media,
+          url: ready.url,
+          postId: ready.postId,
+          tags: ready.tags,
+          hasReportedShown: true,
           isVideo: ready.isVideo,
           isAnimated: ready.isAnimated,
           x: spawnX,
@@ -1398,6 +1409,10 @@
         activeItems.unshift({
           element: media,
           mediaElement: media,
+          url: ready.url,
+          postId: ready.postId,
+          tags: ready.tags,
+          hasReportedShown: true,
           isVideo: ready.isVideo,
           isAnimated: ready.isAnimated,
           x: spawnX,
@@ -1426,6 +1441,10 @@
         activeItems.push({
           element: media,
           mediaElement: media,
+          url: ready.url,
+          postId: ready.postId,
+          tags: ready.tags,
+          hasReportedShown: true,
           isVideo: ready.isVideo,
           isAnimated: ready.isAnimated,
           x: 0,
@@ -1454,6 +1473,10 @@
         activeItems.unshift({
           element: media,
           mediaElement: media,
+          url: ready.url,
+          postId: ready.postId,
+          tags: ready.tags,
+          hasReportedShown: true,
           isVideo: ready.isVideo,
           isAnimated: ready.isAnimated,
           x: 0,
@@ -1478,10 +1501,13 @@
       if (SCROLL_DIRECTION === 'left') {
         while (readyImageQueue.length > 0 && getRightmostEdge() < screenW * 3.5) {
           const ready = readyImageQueue.shift();
-          recordShownMedia(ready);
           const media = ready.media;
           const computedWidth = Math.max(1, ready.aspect * screenH);
           const spawnX = activeItems.length === 0 ? 0 : getRightmostEdge() + GAP;
+          const isVisibleNow = (spawnX < screenW) && ((spawnX + computedWidth) > 0);
+          if (isVisibleNow) {
+            recordShownMedia(ready);
+          }
 
           media.className = 'slide-item';
           media.style.width = `${computedWidth}px`;
@@ -1497,6 +1523,10 @@
           activeItems.push({
             element: media,
             mediaElement: media,
+            url: ready.url,
+            postId: ready.postId,
+            tags: ready.tags,
+            hasReportedShown: isVisibleNow,
             isVideo: ready.isVideo,
             isAnimated: ready.isAnimated,
             x: spawnX,
@@ -1510,12 +1540,15 @@
       } else if (SCROLL_DIRECTION === 'right') {
         while (readyImageQueue.length > 0 && getLeftmostEdge() > -screenW * 2.5) {
           const ready = readyImageQueue.shift();
-          recordShownMedia(ready);
           const media = ready.media;
           const computedWidth = Math.max(1, ready.aspect * screenH);
           const spawnX = activeItems.length === 0
             ? (screenW - computedWidth)
             : (getLeftmostEdge() - computedWidth - GAP);
+          const isVisibleNow = (spawnX < screenW) && ((spawnX + computedWidth) > 0);
+          if (isVisibleNow) {
+            recordShownMedia(ready);
+          }
 
           media.className = 'slide-item';
           media.style.width = `${computedWidth}px`;
@@ -1531,6 +1564,10 @@
           activeItems.unshift({
             element: media,
             mediaElement: media,
+            url: ready.url,
+            postId: ready.postId,
+            tags: ready.tags,
+            hasReportedShown: isVisibleNow,
             isVideo: ready.isVideo,
             isAnimated: ready.isAnimated,
             x: spawnX,
@@ -1544,10 +1581,13 @@
       } else if (SCROLL_DIRECTION === 'up') {
         while (readyImageQueue.length > 0 && getBottommostEdge() < screenH * 3.5) {
           const ready = readyImageQueue.shift();
-          recordShownMedia(ready);
           const media = ready.media;
           const computedHeight = Math.max(1, screenW / Math.max(0.05, ready.aspect));
           const spawnY = activeItems.length === 0 ? 0 : getBottommostEdge() + GAP;
+          const isVisibleNow = (spawnY < screenH) && ((spawnY + computedHeight) > 0);
+          if (isVisibleNow) {
+            recordShownMedia(ready);
+          }
 
           media.className = 'slide-item';
           media.style.width = `${screenW}px`;
@@ -1563,6 +1603,10 @@
           activeItems.push({
             element: media,
             mediaElement: media,
+            url: ready.url,
+            postId: ready.postId,
+            tags: ready.tags,
+            hasReportedShown: isVisibleNow,
             isVideo: ready.isVideo,
             isAnimated: ready.isAnimated,
             x: 0,
@@ -1576,12 +1620,15 @@
       } else if (SCROLL_DIRECTION === 'down') {
         while (readyImageQueue.length > 0 && getTopmostEdge() > -screenH * 2.5) {
           const ready = readyImageQueue.shift();
-          recordShownMedia(ready);
           const media = ready.media;
           const computedHeight = Math.max(1, screenW / Math.max(0.05, ready.aspect));
           const spawnY = activeItems.length === 0
             ? (screenH - computedHeight)
             : (getTopmostEdge() - computedHeight - GAP);
+          const isVisibleNow = (spawnY < screenH) && ((spawnY + computedHeight) > 0);
+          if (isVisibleNow) {
+            recordShownMedia(ready);
+          }
 
           media.className = 'slide-item';
           media.style.width = `${screenW}px`;
@@ -1597,6 +1644,10 @@
           activeItems.unshift({
             element: media,
             mediaElement: media,
+            url: ready.url,
+            postId: ready.postId,
+            tags: ready.tags,
+            hasReportedShown: isVisibleNow,
             isVideo: ready.isVideo,
             isAnimated: ready.isAnimated,
             x: 0,
@@ -1655,12 +1706,18 @@
 
       const moveBy = SCROLL_SPEED * deltaTime;
       let removedAny = false;
+      const sw = window.innerWidth;
+      const sh = window.innerHeight;
 
       if (SCROLL_DIRECTION === 'left') {
         for (let i = 0; i < activeItems.length; i++) {
           const item = activeItems[i];
           item.x -= moveBy;
           item.element.style.transform = `translate3d(${item.x}px, 0, 0)`;
+          if (!item.hasReportedShown && item.x < sw && (item.x + item.width) > 0) {
+            item.hasReportedShown = true;
+            recordShownMedia(item);
+          }
         }
         while (activeItems.length > 0 && (activeItems[0].x + activeItems[0].width) < -100) {
           destroyItem(activeItems.shift());
@@ -1671,8 +1728,12 @@
           const item = activeItems[i];
           item.x += moveBy;
           item.element.style.transform = `translate3d(${item.x}px, 0, 0)`;
+          if (!item.hasReportedShown && item.x < sw && (item.x + item.width) > 0) {
+            item.hasReportedShown = true;
+            recordShownMedia(item);
+          }
         }
-        while (activeItems.length > 0 && activeItems[activeItems.length - 1].x > window.innerWidth + 100) {
+        while (activeItems.length > 0 && activeItems[activeItems.length - 1].x > sw + 100) {
           destroyItem(activeItems.pop());
           removedAny = true;
         }
@@ -1681,6 +1742,10 @@
           const item = activeItems[i];
           item.y -= moveBy;
           item.element.style.transform = `translate3d(0, ${item.y}px, 0)`;
+          if (!item.hasReportedShown && item.y < sh && (item.y + item.height) > 0) {
+            item.hasReportedShown = true;
+            recordShownMedia(item);
+          }
         }
         while (activeItems.length > 0 && (activeItems[0].y + activeItems[0].height) < -100) {
           destroyItem(activeItems.shift());
@@ -1691,8 +1756,12 @@
           const item = activeItems[i];
           item.y += moveBy;
           item.element.style.transform = `translate3d(0, ${item.y}px, 0)`;
+          if (!item.hasReportedShown && item.y < sh && (item.y + item.height) > 0) {
+            item.hasReportedShown = true;
+            recordShownMedia(item);
+          }
         }
-        while (activeItems.length > 0 && activeItems[activeItems.length - 1].y > window.innerHeight + 100) {
+        while (activeItems.length > 0 && activeItems[activeItems.length - 1].y > sh + 100) {
           destroyItem(activeItems.pop());
           removedAny = true;
         }
@@ -3316,7 +3385,7 @@
     // =========================================================================
     setInterval(async () => {
       try {
-        const res = await fetch(`${LOCAL_ORIGIN}/epoch?screen=${encodeURIComponent(SCREEN_ID)}`);
+        const res = await fetch(`${LOCAL_ORIGIN}/epoch?screen=${encodeURIComponent(SCREEN_ID)}&_t=${Date.now()}`, { cache: 'no-store' });
         if (res.ok) {
           const data = await res.json();
           if (typeof data.enabled === 'boolean') {
@@ -3346,7 +3415,7 @@
               lastPropSeq = data.prop_seq;
             } else if (data.prop_seq > lastPropSeq) {
               lastPropSeq = data.prop_seq;
-              const propRes = await fetch(`${LOCAL_ORIGIN}/properties?screen=${encodeURIComponent(SCREEN_ID)}`);
+              const propRes = await fetch(`${LOCAL_ORIGIN}/properties?screen=${encodeURIComponent(SCREEN_ID)}&_t=${Date.now()}`, { cache: 'no-store' });
               if (propRes.ok) {
                 const payload = await propRes.json();
                 if (typeof payload.enabled === 'boolean') {
@@ -3394,14 +3463,19 @@
               } else if (DISPLAY_MODE === 'slideshow') {
                 slideshowTimer = 999999;
                 await fetchNextPage(true);
+              } else if (DISPLAY_MODE === 'masonry') {
+                clearPreStagedMasonrySwitch(false);
+                masonrySwitchTimer = 999;
+                await fetchNextPage(true);
               } else {
+                timeSinceLastDrop = 999;
                 await fetchNextPage(true);
               }
             }
           }
         }
       } catch (e) {}
-    }, 1000);
+    }, 400);
 
     // =========================================================================
     // WALLPAPER ENGINE PROPERTY LISTENER
@@ -3433,7 +3507,9 @@
                   if (it.mediaElement) {
                     readyImageQueue.unshift({
                       media: it.mediaElement,
-                      url: it.mediaElement.src || '',
+                      url: it.url || it.mediaElement.src || '',
+                      postId: Number(it.postId) || 0,
+                      tags: String(it.tags || ''),
                       isVideo: it.isVideo,
                       isAnimated: it.isAnimated,
                       isGif: false,
@@ -3522,7 +3598,7 @@
     async function init() {
       resizePolaroidCanvas(false);
       try {
-        const propRes = await fetch(`${LOCAL_ORIGIN}/properties?screen=${encodeURIComponent(SCREEN_ID)}`);
+        const propRes = await fetch(`${LOCAL_ORIGIN}/properties?screen=${encodeURIComponent(SCREEN_ID)}&_t=${Date.now()}`, { cache: 'no-store' });
         if (propRes.ok) {
           const payload = await propRes.json();
           const props = payload.properties || payload;
