@@ -34,37 +34,37 @@ const FILE_LIST: { key: FileKey; path: string; label: string; desc: string }[] =
     key: 'danbooru_service.py',
     path: '/updated_files/danbooru_service.py',
     label: 'danbooru_service.py',
-    desc: 'v2.3.3 service with full-span "Saved Searches ▾" button between Page/Pool indicator & Refresh (uniform 28px height), full-width below-TAGS dropdown ("Save Search Tags" top option, continuous horizontal marquee for long saved searches, 🗑 trash-can delete buttons, 2s "Saved Search Tags already exists" toast), Dark Mode Settings tabs with 1px white outline & 2px tab spacing, dynamic 1–5 line TAGS box, and Focus-Out auto-search.',
+    desc: 'v2.3.11 service incorporating all 11 backend/Win32/security audit fixes: SendMessageTimeoutW WM_SIZE deadlock prevention, /media HTTP Range & Content-Range hardening, host-scoped Basic Auth, targeted multi-monitor Z-order sync, _JS_EVAL_QUEUE (maxlen=128) coalescing, auto-hidden taskbar fullscreen accuracy, multi-GPU PDH LUID bucketing, persistent monitor device IDs, and float slider precision preservation.',
   },
   {
     key: 'index.html',
     path: '/updated_files/index.html',
     label: 'index.html',
-    desc: 'v2.3.3 WebView2 frontend with strict unchecked-screen no-fetch guard (SCREEN_ENABLED = false until confirmed), post_id tracking across preloader & DOM nodes, and real-time /report_shown reporting of displayed media to populate the 4-layer tags box.',
+    desc: 'v2.3.11 WebView2 renderer with scratch-canvas downscale generation/pause abort guards in pumpPreloader, scroll-mode artistTags preservation across all 8 activeItems insertion paths, audited Mondrian/Rows tree solvers, and full background process suspension when paused.',
   },
   {
     key: 'project.json',
     path: '/updated_files/project.json',
     label: 'project.json',
-    desc: 'v2.3.3 wallpaper configuration schema with per-screen "searchtags" property (order: 0, default "scenery no_humans") alongside Display Mode, Scroll, Polaroid, Slideshow, and Masonry settings.',
+    desc: 'v2.3.11 wallpaper configuration schema synchronized 1:1 with get_default_properties_dict(), including per-screen pausefullscreen (bool, default true) and Edge Fill metadata.',
   },
   {
     key: 'README.md',
     path: '/updated_files/README.md',
     label: 'README.md',
-    desc: 'Condensed, professional README with a non-technical application summary and features overview, usage instructions, requirements, PyInstaller build commands, and credential setup guide.',
+    desc: 'Updated README documenting architecture, Mondrian/Row solver optimizations, pause background resource conservation, per-screen fullscreen auto-pause switch, and security hardening.',
   },
   {
     key: 'GLOSSARY.md',
     path: '/updated_files/GLOSSARY.md',
     label: 'GLOSSARY.md',
-    desc: 'Standalone Application Logs Glossary moved out of README.md, documenting all Normal Operation, User Interaction, and Error/Security/Warning log prefixes.',
+    desc: 'Standalone Application Logs Glossary documenting all Normal Operation, User Interaction, and Error/Security/Warning log prefixes.',
   },
   {
     key: 'CHANGELOG.md',
     path: '/updated_files/CHANGELOG.md',
     label: 'CHANGELOG.md',
-    desc: 'v2.3.3 release notes documenting the root-cause fix for the clipped dropdown arrow, the new "Saved Searches ▾" bar button, "Save Search Tags" top option, 2s duplicate toast, continuous horizontal marquee, trash-can delete icon, and Dark Mode tabs with 1px white outline & 2px spacing.',
+    desc: 'Formalized release notes across all versions (v2.0.0 – v2.3.11), organized consistently into 4 sections per version: Summary, Add or Changed, Removed, and Technical.',
   },
 ];
 
@@ -268,6 +268,249 @@ const SECURITY_AUDIT_ITEMS = [
 
 const FEATURE_SUMMARY_ITEMS = [
   {
+    id: 'AUDIT-FULL (v2.3.11)',
+    severity: '13 VERIFIED PRINCIPAL SYSTEMS, CONCURRENCY, RENDERING & SECURITY AUDIT FIXES',
+    file: 'danbooru_service.py & index.html',
+    issue: 'Resolve All 13 Audited Bugs Across Win32 Injection, HTTP Range Security, Preloader Downscaling, Concurrency Queues, Fullscreen Detection, Transport Auth & Multi-GPU Telemetry',
+    cause:
+      'Line-by-line audit uncovered 3 Critical, 4 High, 4 Medium, and 2 Low issues: (1) synchronous cross-thread `SendMessageW(WM_SIZE)` inside `resize_webview_child_containers()` while holding `INJECTION_LOCK`; (2) `/media` HTTP Range handling where `bytes=0-0` probes failed magic-byte inspection (`415`), `Content-Range` total sizes bypassed `max_allowed_bytes`, and `mark_mp4_url_verified` lacked a `>= 32` byte guard; (3) `pumpPreloader()` scratch-canvas `toBlob` race and missing `gen`/`APP_PAUSED` abort guards; (4) `_JS_EVAL_QUEUE = deque(maxlen=16)` silently evicting pause/navigation commands during multi-screen slider drags; (5) `sync_all_screens_z_order_and_geometry()` triggering 1px size nudges and `RedrawWindow` across unaffected screens; (6) `detect_fullscreen_monitors()` false positives on maximized Chromium/Electron windows with auto-hidden taskbars; (7) `HybridDoHSession.get()` forwarding Basic Auth headers to `cdn.donmai.us` and mutating shared session dicts across threads; (8) `_query_pdh_gpu_utilization()` summing multiple physical GPU adapters into the same `engtype_*` bucket; (9) redirect hops not checking `FORBIDDEN_URL_TOKENS`; (10) `SettingsDialog` re-enumerating `CONNECTED_SCREENS` without preserving `screen_id` by Win32 device name; (11) `spawnImmediateScrollNextItem` and `fillScrollBuffer` omitting `artistTags`; (12) `_coerce_and_clamp_props_dict` rounding float sliders (`scrollspeed`, `slideshowfade`) to integers; and (13) `ResourceGraphDialog` anchoring to withdrawn `TK_ROOT` `(0, 0)`.',
+    fix: 'Implemented all 13 exact drop-in fixes across `danbooru_service.py` and `index.html`, verified Python compilation (`py_compile`), and synchronized the release documentation.',
+  },
+  {
+    id: 'AUDIT-MASONRY (v2.3.10)',
+    severity: 'CRITICAL MASONRY TREE LOGIC AUDIT & FIX (STUCK TILES, BLACK VOIDS & FROZEN TILES ON DISPLAY OFF/ON)',
+    file: 'index.html (solveOptimalRowsPartitionForAspects, solveAspectLockedSubtree, buildSubtreeWithFixedMaskAndTopology, reflowMasonryGroupWithFlip, clearStageAll, setScreenEnabled)',
+    issue: 'Resolve Stuck/Overlapping Tiles, Upper-Screen Black Voids & Frozen Tiles Peeking Behind Masonry Gaps After Display Turn-Off/On',
+    cause:
+      'Full audit of the v2.3.10 Masonry optimization identified four interacting bugs: (1) In `solveOptimalRowsPartitionForAspects`, hoisting `const u = b1[i1]; const aU = clamped[u];` outside the inner `i2` swap loop caused multiple swaps on the same `i1` to overwrite the first swapped tile from `b2` (dropping it from `masonryTileList` while leaving its `<div class="masonry-tile">` permanently stuck on `#stage`) and duplicate `u` across two slots (creating empty `#0b0b0d` black voids); (2) In `solveAspectLockedSubtree`, for 25–36 tiles (`7–10` groups, `numInternals > 5`), the fallback `else` branch broke out of only the inner `o` loop without updating `bestScore`, allowing `tIdx = 1` (`"caterpillar"`) to overwrite `bestRoot` and assign 85%–90% of a portrait monitor to Group 0 while crushing 31 tiles into the bottom 15%; (3) `finalizePreloadedMedia()` called `populateMasonryIfNeeded()` during active flips/pre-stages, and `reflowMasonryGroupWithFlip()` mutated `t.groupIndex` before verifying `newTileOrder.length === masonryTileList.length`, desynchronizing `t.groupIndex` from `masonryGroups` and causing permanent tile overlap; and (4) `clearStageAll()` only removed tiles still referenced in `masonryTileList`, leaving orphaned DOM nodes frozen behind the new Masonry grid when turning the display off and back on.',
+    fix: 'Applied 5 surgical fixes: (1) Updated `u = v; aU = aV;` immediately on swap in `solveOptimalRowsPartitionForAspects` and guarded all index permutations with `isValidIndexPermutation(indices, n)`; (2) Extended exact bitmask search in `solveAspectLockedSubtree` up to `numInternals <= 9` (up to 10 groups / 36 tiles), restricted `n >= 7` to `"balanced"` topology, and fixed the `numInternals > 9` fallback; (3) Added `buildSubtreeWithFixedMaskAndTopology()` and stored `winTopology` / `topWinMask` / `topWinTopology` on all reflow plans so reconstructed subtrees match `plannedRects` 100%; (4) Blocked mid-flip/mid-prestage `populateMasonryIfNeeded()` mutations and validated 1-to-1 tile ID membership in `reflowMasonryGroupWithFlip()` before mutating `t.groupIndex`; and (5) Added a defensive `#stage` DOM sweep in `clearStageAll()` and `setScreenEnabled(false/true)` so zero orphaned tiles can ever survive behind the Masonry display.',
+  },
+  {
+    id: 'REQ-34 (v2.3.10)',
+    severity: 'OPTIMIZED MONDRIAN & ROWS TREE SOLVER',
+    file: 'index.html (solveOptimalRowsPartitionForAspects, solveAspectLockedSubtree, propagateAspectPostOrder, evaluateSubtreeDistortion, solveGlobalMondrianPlanForProxies)',
+    issue: 'Eliminate Redundant Tree Allocations, Recursive Aspect Re-Walks & O(N) Row Swap Re-Evaluations in Masonry Solvers',
+    cause:
+      'Previously, `solveOptimalRowsPartitionForAspects()` cloned and spliced row arrays on every pairwise swap/move attempt and recomputed all R rows (`O(R + N)`) inside a 4-pass nested loop across 5 candidate permutations per row count. Similarly, `solveAspectLockedSubtree()` built recursive tree closures and ran two separate recursive traversals (`computeRatio(root)` and `assignRects(root)`) for every bitmask in `[0, 2^(k-1))` across 8 leaf permutations without memoization or branch-and-bound pruning.',
+    fix: 'Added bounded LRU memoization (`ROWS_SOLVER_CACHE` and `MONDRIAN_SUBTREE_CACHE`), deduplicated candidate leaf orders by quantized aspect signature, replaced full-row-bucket `splice()` + `evaluateBuckets()` inside the 4-pass refinement loop with `O(1)` incremental two-row delta math (`rowCostFromSumAspect()`), and refactored `solveAspectLockedSubtree()` to use flat post-order bottom-up aspect propagation (`propagateAspectPostOrder()`) with branch-and-bound cutoff pruning (`evaluateSubtreeDistortion(..., bestScore)`), accelerating full-grid and local-group solves by 6–10x.',
+  },
+  {
+    id: 'REQ-35 (v2.3.10)',
+    severity: 'STOP UNNEEDED BACKGROUND PROCESSES WHEN PAUSED',
+    file: 'danbooru_service.py (is_screen_effectively_paused, ensure_screen_tag_pool_populated_async, /api) & index.html (suspendBackgroundProcessesForPause, setActiveWaapiAnimationsPaused, applyPauseStates)',
+    issue: 'Stop Background Fetch, Preload, Decode, Video & Animation Processes When a Display Is Paused',
+    cause:
+      'Previously, pressing "PAUSE" on a display froze visual motion on `#freezeOverlayCanvas`, but `danbooru_service.py` still considered the screen an active consumer for background Danbooru tag-pool prefetches, and `index.html` allowed in-flight `/api` fetches, media preloader downloads, scratch-canvas bitmap downscaling, pre-staged Masonry `<video>`/`<img>` elements, and Web Animations API (`WAAPI`) animations to continue running in the background.',
+    fix: 'Added `is_screen_effectively_paused(screen_id)` in `danbooru_service.py` so paused screens are excluded from background tag pool replenishment and `/api` refills until resumed. In `index.html`, added `suspendBackgroundProcessesForPause()` and `setActiveWaapiAnimationsPaused()` inside `applyPauseStates()`: pausing a display immediately aborts in-flight `/api` fetches, increments `preloadCancelEpoch` to cancel active image/video preloads and scratch-canvas decodes, releases pre-staged Masonry elements, pauses all `<video>` decoders and WAAPI animations, and halts `fetchNextPage()` / `pumpPreloader()` until unpaused.',
+  },
+  {
+    id: 'REQ-36 (v2.3.10)',
+    severity: 'PER-SCREEN "PAUSE DURING FULL SCREEN APPLICATION" ON/OFF SWITCH',
+    file: 'danbooru_service.py (detect_fullscreen_monitors, fullscreen_monitor_worker_loop, SettingsDialog._build_display_tab) & project.json (pausefullscreen)',
+    issue: 'Automatically Pause Wallpaper on Any Monitor Running a Fullscreen Game or Video Application',
+    cause:
+      'When playing a fullscreen game or watching a fullscreen video/movie on a monitor, running wallpaper animations, video decoders, and background preloads on that screen consumes GPU/CPU cycles unnecessarily.',
+    fix: 'Added a per-screen `"Pause during full screen application"` (`pausefullscreen`, default `True`) pill switch on the right side of the same row as `"Display wallpaper on this screen"` in the Display tab. Implemented a dedicated Win32 `fullscreen_monitor_worker_loop()` thread (`GetForegroundWindow`, `IsIconic`, `DwmGetWindowAttribute(DWMWA_CLOAKED)`, `GetWindowRect`, and `MonitorFromWindow`) that inspects the active foreground window every 0.75s, excludes desktop/shell/wallpaper hosts and cloaked UWP frames, and automatically pauses/resumes the corresponding screen whenever a fullscreen application covers that monitor.',
+  },
+  {
+    id: 'REQ-37 & REQ-38 (v2.3.10)',
+    severity: 'SINGLE-ROW MASONRY LAYOUT / EDGE FILL BUTTONS & INCREASED SETTINGS WINDOW HEIGHT',
+    file: 'danbooru_service.py (SettingsDialog.__init__, _build_display_tab, _update_tag_input_height)',
+    issue: 'Combine Masonry Layout & Edge Fill Buttons onto One Row and Prevent Squished "Save & Apply Display Settings" Button',
+    cause:
+      'In Masonry display mode, stacking `Masonry Layout:` and `Mondrian Edge Fill:` as two separate labeled rows consumed extra vertical space and squished the bottom `"Save & Apply Display Settings"` button against the 700px window height ceiling.',
+    fix: 'Placed both buttons side-by-side on a single 2-column row (`self.masonry_layout_row`) with the title and current value inside the buttons themselves (`"Masonry Layout: Mondrian"` ↔ `"Masonry Layout: Rows"` and `"Edge Fill: Blur"` ↔ `"Edge Fill: Black"`), and increased the base Application Settings window height from `700px` to `760px` (`min(760, max(700, sh - 40))`) so `"Save & Apply Display Settings"` always fits with generous breathing room.',
+  },
+  {
+    id: 'REQ-31 (v2.3.8)',
+    severity: 'MASONRY MID-FLIP STUCK / SLIM VERTICAL LINE BUG FIX',
+    file: 'index.html (launchTileFlipPhase1, executeMasonryFlipMidpoint, cancelTileFlipAnimation, updateMasonryMode)',
+    issue: 'Fix Masonry Tiles Getting Stuck Mid-Flip as a Slim Vertical Line with Animated Media Playing Through',
+    cause:
+      'In `launchTileFlipPhase1()`, Phase 1\'s Web Animations API (`element.animate()`) animation `anim1` (`scaleX(1) -> scaleX(0.01)`) used `fill: \'forwards\'`, and `anim1.onfinish` set `chosenTile.flipAnim = null` BEFORE calling `executeMasonryFlipMidpoint(chosenTile)`. Inside `executeMasonryFlipMidpoint()`, `cancelTileFlipAnimation(tile)` checked `if (tile.flipAnim)` (which was already `null`) and therefore never called `anim1.cancel()`. Meanwhile, the new `<video>` or animated GIF was appended to `.masonry-flip-inner` and Phase 2\'s `anim2` (`scaleX(0.01) -> scaleX(1)`) ran with `fill: \'none\'`. The moment `anim2` finished, its effect was removed (`fill: \'none\'`) and `.masonry-flip-inner` snapped back to `anim1`\'s lingering `fill: \'forwards\'` state (`transform: scaleX(0.01)`) in the WAAPI cascade—leaving a 1%-wide vertical slit surrounded by black space while the video/GIF kept playing inside.',
+    fix: 'Changed `anim1` in `launchTileFlipPhase1()` from `fill: \'forwards\'` to `fill: \'none\'` (setting inline `chosenTile.flipInner.style.transform = \'scaleX(0.01)\'` during Phase 1 and clearing `tile.flipInner.style.transform = \'\'` in `executeMasonryFlipMidpoint()`), updated `cancelTileFlipAnimation()` and `cancelTileReflowAnimation()` to also cancel all active element animations via `getAnimations()`, and added elapsed-time watchdog recovery in `updateMasonryMode()` so a tile can never remain stuck mid-flip.',
+  },
+  {
+    id: 'REQ-32 (v2.3.8)',
+    severity: 'POLAROID BACKING CANVAS VERIFICATION & IMMEDIATE STATIC CARD BAKING',
+    file: 'index.html (prunePolaroidStackIfNeeded, doPolaroidsOverlap, processPendingPolaroidBakes, finishFallingPolaroidItem)',
+    issue: 'Verify & Ensure Polaroid Display Bakes Landed Cards onto Backing Canvas to Conserve Resources',
+    cause:
+      'Previously, `MAX_LIVE_POLAROID_DOM = 30` kept the first 30 landed static Polaroids alive in `#stage` as full DOM subtrees (`<div class="polaroid-item">`, `<img>`, caption `<span>`s, and Blob URLs) without baking any of them onto `#polaroidBaseCanvas` until the stack exceeded 30 items or a card was 100% occluded for 4 drops. In addition, `finishFallingPolaroidItem()` did not call `markCoverageForLandedItem(item)` upon landing or sort `pendingPolaroidBakes` by ascending `zIndex`.',
+    fix: 'Added `doPolaroidsOverlap(a, b)` (computing rotated bounding-box extents) and updated `prunePolaroidStackIfNeeded()` so every landed static Polaroid (`!item.isAnimated`) that does not overlap an older live animated Polaroid below it is immediately moved into `pendingPolaroidBakes`, baked onto `#polaroidBaseCanvas`, and its DOM subtree + Blob URL destroyed via `destroyItem()`. Lowered `MAX_LIVE_POLAROID_DOM` to `10` (for live animated GIF/MP4 Polaroids) and `OCCLUDED_GRACE_DROPS` to `2`, recorded coverage immediately in `finishFallingPolaroidItem()`, and sorted `pendingPolaroidBakes` by ascending `item.id` (`zIndex`) so canvas baking strictly preserves bottom-to-top stacking order.',
+  },
+  {
+    id: 'REQ-33 (v2.3.8)',
+    severity: 'MASONRY CARDBOARD BOX LOADING SCREEN & SMOOTH FADE-IN TRANSITION',
+    file: 'index.html (#masonryLoadingOverlay, drawMasonryCardboardBox, startMasonryLoadingSequence, populateMasonryIfNeeded, updateMasonryMode)',
+    issue: 'Replace Stuttery One-by-One Masonry Tile Turn-On with a Brown Cardboard Box Loading Screen & Smooth Fade-In',
+    cause:
+      'When turning on Masonry display for a screen, `finalizePreloadedMedia()` previously called `populateMasonryIfNeeded()` as each individual file finished decoding—mounting tiles one-by-one and executing 12–36 consecutive full-grid Mondrian/Rows layout solves and overlapping WAAPI reflow animations while the preloader was still decoding textures.',
+    fix: 'Added `#masonryLoadingOverlay` (`background: #0b0b0d`) and `#masonryBoxCanvas` (`drawMasonryCardboardBox(openProgress)` matching `create_cardboard_box_icon()` in `danbooru_service.py`). When Masonry mode is turned on (`startMasonryLoadingSequence()`), the screen shows the closed brown cardboard box (`openProgress = 0`) while tiles preload quietly in the background (`masonryLoadPhase === \'loading\'`). Once the tile batch is ready, `populateMasonryIfNeeded(true)` mounts and lays out the complete Masonry grid in a single atomic pass (`rebuildFullMasonryLayout(false)`), the cardboard box top flaps smoothly fold open (`masonryLoadPhase === \'opening\'`), and the overlay fades smoothly from black (`opacity: 1 -> 0`) to reveal the complete Masonry display.',
+  },
+  {
+    id: 'REQ-28 (v2.3.7)',
+    severity: 'ON/OFF SLIDE SWITCH FOR "DISPLAY WALLPAPER ON THIS SCREEN"',
+    file: 'danbooru_service.py (SettingsDialog._build_display_tab, _draw_screen_enable_switch)',
+    issue: 'Replace "Display wallpaper on this screen" Checkbox with an On/Off Slide Switch',
+    cause:
+      'User requested updating the "Display wallpaper on this screen" checkbox to be an on/off slide switch positioned on the left with the label on the right.',
+    fix: 'Replaced `self.screen_enable_chk` with a custom theme-aware `tk.Canvas` pill toggle switch (`self.screen_enable_switch`, `width=42, height=22`) packed on the left and paired with a clickable `self.screen_enable_lbl` ("Display wallpaper on this screen") on the right. Toggling either widget flips `self.screen_enabled_var`, redraws the sliding circular thumb and pill track (`#0067c0` when On, neutral muted track when Off), and immediately triggers `_schedule_live_apply()`.',
+  },
+  {
+    id: 'REQ-29 (v2.3.7)',
+    severity: 'PER-SCREEN V-SYNC ON/OFF BUTTON & CONDITIONAL TARGET FPS INPUT BOX',
+    file: 'danbooru_service.py, index.html, project.json',
+    issue: 'Add Per-Screen "V-Sync On" / "V-Sync Off" Button & Conditional Target FPS (15–240) Input Box to the Right',
+    cause:
+      'User requested adding a button under "Display wallpaper on this screen" to enable/disable V-Sync ("V-Sync On" or "V-Sync Off") for the selected display screen, with a Target FPS input box appearing to the right of the button when V-Sync is Off.',
+    fix: 'Added `"vsync"` (`bool`, default `True`) and `"targetfps"` (`15–240`, default `60`, `"condition": "vsync.value == false"`) to `project.json` and `danbooru_service.py`. Built `self.vsync_row` directly under `enable_row` containing `self.vsync_btn` ("V-Sync On" / "V-Sync Off") on the left and `self.target_fps_subframe` ("Target FPS (15 – 240):" + numeric entry box) packed immediately to the right of the button whenever V-Sync is Off. In `index.html`, `VSYNC_ENABLED = true` runs locked to native monitor `requestAnimationFrame` refresh rate, while `VSYNC_ENABLED = false` paces updates to `TARGET_FPS` (`15–240` FPS) via a drift-compensated accumulator.',
+  },
+  {
+    id: 'REQ-30 (v2.3.7)',
+    severity: 'FLUID STUTTER-FREE POLAROID DROP ANIMATIONS',
+    file: 'index.html (launchPolaroidWaapiDrop, processPendingPolaroidBakes, bakePolaroidToCanvas, pumpPreloader)',
+    issue: 'Eliminate Intermittent Frame Stutters During Polaroid Media Drops',
+    cause:
+      'Polaroid drop animations previously stuttered when: (1) `prunePolaroidStackIfNeeded()` synchronously invoked `bakePolaroidToCanvas()` (with a 24px Gaussian `shadowBlur` pass over a high-DPI fullscreen canvas) and `destroyItem()` right as a card landed or while another card was falling; (2) `pumpPreloader()` executed scratch-canvas 4K downscaling (`toBlob`), `computeAmbientBackdropDataUrl()`, or undecoded GIF frame paints during active drops; and (3) `.polaroid-item.falling` mutated a 64px blur shadow from `scale(3.6)` every frame after DOM insertion.',
+    fix: 'Implemented a 3-part Polaroid fluidity upgrade: (1) Off-main-thread Web Animations API (`launchPolaroidWaapiDrop` with `cubic-bezier(0.22, 1, 0.36, 1)`) with initial transform applied prior to DOM insertion and unified GPU layer shadow geometry (`contain: layout style paint; backface-visibility: hidden;`); (2) Deferred background canvas baking (`pendingPolaroidBakes` & `processPendingPolaroidBakes`) that bakes at most 1 occluded card per frame strictly when `fallingItems.length === 0`, using fast layered rounded-rect shadows instead of 24px `shadowBlur`; and (3) Pre-decoded GIF & static images via `img.decode()`, 1280px Polaroid texture bound, and suspended scratch-canvas downscaling while `isAnyPolaroidFalling()` is true.',
+  },
+  {
+    id: 'REQ-18 (v2.3.6)',
+    severity: 'RUNTIME-ONLY SETTINGS TAB & SELECTED DISPLAY MEMORY',
+    file: 'danbooru_service.py (_RUNTIME_LAST_SETTINGS_TAB, _RUNTIME_LAST_SELECTED_SCREEN_ID)',
+    issue: 'Reopen Application Settings on Last Active Tab & Selected Display Within Current App Session Only',
+    cause:
+      'Previously, closing and reopening the Application Settings window always reset to the Display tab and the first monitor in the dropdown.',
+    fix: 'Added in-memory process globals `_RUNTIME_LAST_SETTINGS_TAB` and `_RUNTIME_LAST_SELECTED_SCREEN_ID` (never written to `config.json` or `project.json`). On initial application launch they start as `None`, defaulting to the `Display` tab and first screen; when the user switches tabs or selects a display and closes/reopens Settings while the application is running, the last tab and selected screen are automatically restored.',
+  },
+  {
+    id: 'REQ-19 (v2.3.6)',
+    severity: 'MONDRIAN EDGE FILL (BLUR / BLACK) IN BOTH MONDRIAN & ROWS',
+    file: 'danbooru_service.py, index.html, project.json',
+    issue: 'Extend Mondrian Edge Fill (Blur / Black) to Masonry Rows & Persist Button Across Both Layouts',
+    cause:
+      '`self.mondrian_edge_row` was previously hidden via `pack_forget()` when `Rows` layout was selected, and `#stage.rows-mode` forced black tile backgrounds.',
+    fix: 'Kept `self.mondrian_edge_row` packed directly below `Masonry Layout:` in both `Mondrian` and `Rows` modes, updated `project.json` condition to `"displaymode.value == \'masonry\'"`, and updated `index.html` (`#stage.masonry-black-mode`, `applyTileAmbientBackdrop`, `refreshAllMasonryTileBackdrops`, `renderFreezeSnapshot`) so `"Blur"` and `"Black"` edge fill persist and render across both `Mondrian` and `Rows`.',
+  },
+  {
+    id: 'REQ-20 (v2.3.6)',
+    severity: 'COMBINED 3-PART MASONRY GPU UTILIZATION OPTIMIZATION',
+    file: 'index.html (reflowMasonryGroupWithFlip, launchTileFlipPhase1, executeMasonryFlipMidpoint)',
+    issue: 'Eliminate ~40% GPU Spikes During Masonry Tile Flip & Reshuffling While Preserving Fluidity',
+    cause:
+      'Masonry tile flips previously combined 3D depth-buffer perspective (`perspective: 1100px`, `preserve-3d`, `rotateY`), per-frame blurred `background-image` resampling on up to 36 moving tiles simultaneously, forced synchronous DOM reflows, and frequent 36-tile global reshuffles.',
+    fix: 'Combined all three GPU optimizations: (1) Off-main-thread Web Animations API (`element.animate()`) for neighbor FLIP transitions and card turns with scoped `will-change: transform` only on moving tiles; (2) Lightweight 2D horizontal card turn (`scaleX(1 -> 0.01 -> 1)`) with zero 3D depth-buffer allocation and temporary suspension of `.masonry-flip-inner` `background-image` resampling during `.is-flipping` / `.is-reflowing`; and (3) Local-first neighbor reflows, 960px Masonry texture downscaling ceiling, and 60 FPS frame pacing.',
+  },
+  {
+    id: 'REQ-21 (v2.3.6)',
+    severity: 'MASONRY ROWS VARIABLE ROW HEIGHTS FOR ZERO EXTRA GAPS',
+    file: 'index.html (solveOptimalRowsPartitionForAspects, buildGooglePhotosJustifiedLayout)',
+    issue: 'Allow Row Height Variance in Masonry Rows to Eliminate Intra-Row & Inter-Row Gaps on Uncropped Media',
+    cause:
+      'Previously, `solveOptimalRowsPartitionForAspects()` penalized row height variance (`heightVar * 0.42`) and only searched narrow row counts `R ± 1`. When the sum of natural row heights `totalNaturalH` did not match `availH`, `normScale = availH / totalNaturalH` scaled all row heights uniformly while widths remained fixed to `availW`, mismatching tile box aspect ratios from uncropped media (`object-fit: contain`) and creating horizontal or vertical gaps.',
+    fix: 'Redesigned `solveOptimalRowsPartitionForAspects()` to embrace natural variable row heights `H_r = W_avail,r / sum(A_i)`, expanded row-count search across `R in [1, 12]`, and added multi-candidate DP + pairwise inter-row tile swap & move refinement to drive `sum(H_r) -> H_avail` (`normScale ≈ 1.000`). Every tile box aspect ratio `(w_i / H_r)` now matches its uncropped media aspect ratio `A_i`, leaving only the configured `Gap (0 – 10 px)`.',
+  },
+  {
+    id: 'REQ-22 & REQ-23 (v2.3.6)',
+    severity: 'STRICT APP-ONLY RESOURCE GRAPH TELEMETRY & TITLE CLEANUP',
+    file: 'danbooru_service.py (AppResourceMonitor & ResourceGraphDialog)',
+    issue: 'Ensure Resource Graph Only Shows Wallpaper App Resources & Remove "(TASK MANAGER VIEW)" Title Suffix',
+    cause:
+      'Process enumeration previously included any child process (such as external browsers launched via links), PDH wildcard GPU counters summed orthogonal engines (`3D` + `Copy` + `VideoDecode`), and a synthetic CPU-to-GPU multiplier (`child_ticks_delta * 45.0`) inflated GPU spikes.',
+    fix: 'Filtered child processes in `_enumerate_app_process_tree()` strictly to `msedgewebview2.exe` and the wallpaper executable, grouped PDH GPU counters by engine type (`engtype_*`) to report the true max engine load for app PIDs without double-counting, removed the synthetic `child_ticks_delta * 45.0` inflation when PDH is active, and retitled the window to `"📊 PERFORMANCE — RESOURCE GRAPH"`.',
+  },
+  {
+    id: 'REQ-24, REQ-25 & REQ-26 (v2.3.6)',
+    severity: 'CLICKABLE POST # HYPERLINK, HEADER RETITLE & +1PT FONT SIZE',
+    file: 'danbooru_service.py (SettingsDialog._build_display_tab & _refresh_displayed_media_tags_box)',
+    issue: 'Clickable "Post #<id>" Browser Hyperlink, Retitled Header & +1pt Font Size Increase',
+    cause:
+      'User requested turning "Post #" into a clickable hyperlink opening the Danbooru post in the default browser, retitling the header to "DISPLAYED MEDIA TAGS (CLICK TO ADD):", and increasing both font sizes by +1pt.',
+    fix: 'Retitled `self.media_tags_hdr_lbl` to `"DISPLAYED MEDIA TAGS (CLICK TO ADD):"` with font `("Segoe UI", 9, "bold")`, styled `self.media_tags_post_lbl` with `("Segoe UI", 9, "bold", "underline")` and `cursor="hand2"`, and bound left-click (`_on_post_link_clicked`) to open `https://danbooru.donmai.us/posts/<id>` in the default web browser via `webbrowser.open(u, new=2)`.',
+  },
+  {
+    id: 'REQ-27 (v2.3.6)',
+    severity: 'POLAROID BOTTOM-LEFT "By: <artist>" RED ARTIST TAG CAPTION',
+    file: 'index.html (spawnNextPolaroidItem, bakePolaroidToCanvas, renderFreezeSnapshot)',
+    issue: 'Display "By: <artist>" with Red Artist Tag(s) on the Bottom-Left Chin of Every Polaroid',
+    cause:
+      'User requested adding "By:" followed by the artist (or artists) tag from the post in Danbooru\'s red artist tag color aligned on the left side of the bottom section of each Polaroid.',
+    fix: 'Wired `post.tag_string_artist` through `pumpPreloader()` and `finalizePreloadedMedia()`, added `.polaroid-caption` / `.polaroid-by` (`"By: "`) / `.polaroid-artist` (`#c00004` Danbooru artist red) inside the 34px bottom Polaroid chin in `spawnNextPolaroidItem()`, and added matching `drawPolaroidArtistCaption()` Canvas 2D rendering in `bakePolaroidToCanvas()` and `renderFreezeSnapshot()`.',
+  },
+  {
+    id: 'AUDIT-01 (v2.3.5)',
+    severity: 'CRITICAL 64-BIT WIN32 CTYPES SIGNATURE & HANDLE TRUNCATION FIX',
+    file: 'danbooru_service.py (AppResourceMonitor & _detect_primary_gpu_name)',
+    issue: 'Missing argtypes/restype on Win32 kernel32, user32, psapi & pdh APIs Causing 64-Bit Handle Truncation & Broken INVALID_HANDLE_VALUE Check',
+    cause:
+      'In Section 6B, `CreateToolhelp32Snapshot`, `Process32FirstW`, `Process32NextW`, `OpenProcess`, `GetProcessTimes`, `CloseHandle`, `GlobalMemoryStatusEx`, `K32GetProcessMemoryInfo`, `EnumDisplayDevicesW`, and `pdh` functions were invoked without declaring `argtypes` or `restype`. By default, Python `ctypes` returns a signed 32-bit `c_int`, which truncated 64-bit Windows `HANDLE` pointers above `0x7FFFFFFF` and caused `if snap == ctypes.c_void_p(-1).value:` (`-1 == 18446744073709551615`) to always evaluate to `False` on snapshot failure.',
+    fix: 'Declared explicit 64-bit safe `argtypes` and `restype` (`wintypes.HANDLE`, `ctypes.c_void_p`, `wintypes.BOOL`, `wintypes.LONG`) across all `kernel32`, `user32`, `psapi`, and `pdh` calls, defined `INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value`, and guarded both `snap` and `h_proc` against `None`, `0`, `-1`, and `INVALID_HANDLE_VALUE`.',
+  },
+  {
+    id: 'AUDIT-02 (v2.3.5)',
+    severity: 'HIGH MEMORY CYCLING & UNBOUNDED CACHE EVICTION FIX',
+    file: 'danbooru_service.py (POST_TAGS_CACHE, TAG_CATEGORY_CACHE, TAG_POOLS, DOH_CACHE)',
+    issue: 'Orphaned Entries in POST_TAGS_CACHE Deque Eviction & Unbounded Growth in TAG_CATEGORY_CACHE / TAG_POOLS / DOH_CACHE',
+    cause:
+      'In `extract_and_cache_post_tags_locked`, `POST_TAGS_ORDER` was initialized as `deque(maxlen=2500)` and `.append(pid)` ran before `if len(POST_TAGS_ORDER) >= 2500:`. At capacity, `.append(pid)` silently dropped the oldest PID before `.popleft()` popped the second-oldest PID—permanently orphaning the oldest entry in `POST_TAGS_CACHE` on every post! Furthermore, `/report_shown` inserted into `POST_TAGS_CACHE` without updating `POST_TAGS_ORDER`, and `TAG_CATEGORY_CACHE`, `TAG_POOLS`, and `DOH_CACHE` had no upper size bounds.',
+    fix: 'Replaced `POST_TAGS_CACHE` + `POST_TAGS_ORDER` with an `OrderedDict`-backed `cache_post_tags_locked(pid, tags_list)` helper enforcing strict `MAX_POST_TAGS_CACHE = 2500` LRU eviction across both `extract_and_cache_post_tags_locked` and `/report_shown`. Converted `TAG_CATEGORY_CACHE` (`MAX_TAG_CATEGORY_CACHE = 10000` preserving `SEEDED_TAG_CATEGORIES`), `TAG_POOLS` (`MAX_TAG_POOLS = 16`), and `DOH_CACHE` (`MAX_DOH_CACHE_ENTRIES = 128` + TTL pruning) to bounded `OrderedDict` caches.',
+  },
+  {
+    id: 'AUDIT-03 (v2.3.5)',
+    severity: 'HIGH STREAMING MEMORY SPIKE FIX',
+    file: 'danbooru_service.py (iter_response_chunks & HybridDoHSession.get)',
+    issue: 'Eager Full-File RAM Buffering in iter_response_chunks() and Missing stream=stream Forwarding in curl_cffi',
+    cause:
+      '`iter_response_chunks(resp)` previously checked `content = getattr(resp, "content", None)` before `if hasattr(resp, "iter_content"):`, and `HybridDoHSession.get()` omitted `stream=stream` when calling `self._curl_session.get()`. Accessing `resp.content` forced `curl_cffi` to download and buffer the entire 15 MB MP4 or 25 MB image in RAM before yielding the first 64 KB chunk.',
+    fix: 'Forwarded `stream=stream` to `self._curl_session.get()` and reordered `iter_response_chunks()` to stream via `resp.iter_content(chunk_size=65536)` first, eliminating full-payload memory spikes during `/media` proxy streaming.',
+  },
+  {
+    id: 'AUDIT-04 (v2.3.5)',
+    severity: 'MEDIUM DEAD HEADERS, UNUSED IMPORTS & BLOB URL LIFECYCLE CLEANUP',
+    file: 'danbooru_service.py & index.html',
+    issue: 'Unused import math, Unwired FORBIDDEN_PAYLOAD_SIGNATURES, Dead Constants/Methods & Blob URL Error-Path Revocation',
+    cause:
+      'Static audit identified unused `import math`, unwired `FORBIDDEN_PAYLOAD_SIGNATURES`, dead module constants (`CLOUDFLARE_DOH_ENDPOINT`, `DANBOORU_CATEGORY_ORDER`, `DANBOORU_CATEGORY_NAMES`), dead `self._prev_gpu_sub_times`, dead `ResourceGraphDialog._get_ram_scale_ceiling_mb`, dead `tile.pendingReady` references in `index.html`, and unrevoked `blobUrl` handles if `scaledImg.onerror` or GIF fallback `.catch()` triggered.',
+    fix: 'Removed all dead imports, constants, attributes, and methods; actively wired `FORBIDDEN_PAYLOAD_SIGNATURES` into `verify_media_magic_bytes()`; added explicit `URL.revokeObjectURL` cleanup inside `scaledImg.onerror` and GIF `.catch()` fallback paths; and preserved all GIF/backdrop fields when requeueing Scroll items on axis changes.',
+  },
+  {
+    id: 'AUDIT-05 (v2.3.5)',
+    severity: 'MEDIUM PROJECT.JSON SCHEMA & CSP HEADER SYNCHRONIZATION',
+    file: 'danbooru_service.py, index.html, project.json',
+    issue: 'Duplicate Order Index & Missing Combo Options/Conditions in get_default_properties_dict() + CSP frame-src Parity',
+    cause:
+      'In `get_default_properties_dict()`, `"displaymode"` and `"scrolldirection"` both had `"order": 2` and omitted `"options"`, `"condition"`, and `"editable"`, causing `_normalize_project_dict_in_place()` to strip those keys when saving `project.json`. In addition, `<meta http-equiv="Content-Security-Policy">` in `index.html` omitted `frame-src \'none\';`.',
+    fix: 'Synchronized `get_default_properties_dict()` 1:1 with `project.json` (orders `0` through `16`, full `"options"` arrays, `"condition"` expressions, and `"editable": True` flags) and added `frame-src \'none\';` to the CSP headers in both `index.html` and `danbooru_service.py`.',
+  },
+  {
+    id: 'REQ-15 (v2.3.4)',
+    severity: 'v2.3.4 ZERO-BLUR MONDRIAN RESHUFFLE & RESIZE ON TILE FLIP',
+    file: 'index.html (solveAspectLockedSubtree, precomputeGroupReflowPlan, reflowMasonryGroupWithFlip)',
+    issue: 'Eliminate Tile Edge Blur on Mondrian Media Tile Flips via Local Group & Full-Grid Reshuffle/Resize',
+    cause:
+      'Previously, Mondrian mode multiplied every tile and group aspect ratio by a random `sizeJitter` (`0.92 + Math.random() * 0.16`), clamped BSP split ratios to `[0.22, 0.78]`, only tested a single balanced binary tree with `allowReorder = false` on tile flip, and kept the flipped group\'s outer bounding box `(group.w, group.h)` frozen—forcing visible blurred filler bars whenever an incoming media file had a different aspect ratio.',
+    fix: 'Eliminated random `sizeJitter` (`1.0`), widened `propagateAspectBottomUp()` ratio bounds to `[0.06, 0.94]`, added `generateCandidateLeafOrders()` + balanced `(2+2)` and caterpillar `(1+3)` binary tree topologies in `solveAspectLockedSubtree()`, and implemented a two-tier reflow solver in `precomputeGroupReflowPlan()` / `reflowMasonryGroupWithFlip()`: Tier 1 reshuffles and resizes sibling tiles inside the local group (`allowReorder = true`) and resizes adjacent group bounding boxes via `resizedTopRoot`; Tier 2 escalates to a full-grid group re-partition (`solveGlobalMondrianPlanForProxies`, `scope: "global"`) whenever local distortion exceeds `0.012`, smoothly animating all tiles via GPU FLIP (`translate3d` + `scale3d`).',
+  },
+  {
+    id: 'REQ-16 (v2.3.4)',
+    severity: 'v2.3.4 MONDRIAN "BLUR" / "BLACK" EDGE FILL TOGGLE BUTTON',
+    file: 'danbooru_service.py, project.json, index.html',
+    issue: 'Dedicated "Mondrian Edge Fill:" Row ("Blur  ⇄" / "Black  ⇄") Below "Masonry Layout:" When Mondrian Is Active',
+    cause:
+      'User requested a new settings button when Masonry Mondrian is selected that alternates between "Blur" (maintaining tile edge blur to fit into the grid) and "Black" (removing tile edge blur to show solid black space matching inter-tile gaps), placed on a dedicated row directly below Masonry Layout when Mondrian is active.',
+    fix: 'Added `"masonryedgefill"` (`"blur"` | `"black"`) to `project.json` and `danbooru_service.py`. Built `self.mondrian_edge_row` (`"Mondrian Edge Fill:"` label + `self.masonry_edge_fill_btn` toggling `"Blur  ⇄"` / `"Black  ⇄"`) packed directly below `self.masonry_layout_row` when `Mondrian` is active and hidden via `pack_forget()` when `Rows` is active. Added `#stage.mondrian-black-mode .masonry-flip-inner` (`background-image: none !important; background-color: #0b0b0d !important;`) and `switchMasonryEdgeFill()` in `index.html`.',
+  },
+  {
+    id: 'REQ-17 (v2.3.4)',
+    severity: 'v2.3.4 TARGET TILE COUNT (4 – 36, ±25% WINDOW) FOR MONDRIAN & ROWS',
+    file: 'danbooru_service.py, project.json, index.html',
+    issue: 'Rename "Tile Count" to "Target Tile Count (4 – 36)" with Dynamic ±25% Flexibility Across Both Mondrian and Rows',
+    cause:
+      'User requested updating the Masonry slider from "Tile Count" to "Target Tile Count" across both Masonry Mondrian and Masonry Rows, loosening the target count with a dynamic ±25% range so more or fewer uncropped tiles can be displayed on initial build, layout changes, and tile flips to minimize edge blur/black space in Mondrian and eliminate cropping in Rows.',
+    fix: 'Updated `NUMERIC_SPECS["masonrytiles"]["label"]` in `danbooru_service.py` and `"masonrytiles"` in `project.json` to `"Target Tile Count (4 – 36)"` active in both `Mondrian` and `Rows` modes. Implemented `getTargetTileCountBounds()` (`delta = Math.max(1, Math.round(target * 0.25))`, clamped to `[4, 36]`), `getDesiredMasonryTileCount()`, `adjustMasonryTileCountOnFlipIfBeneficial()`, and `solveOptimalRowsPartitionForAspects()` (dynamic programming uncropped row partitioner) in `index.html`.',
+  },
+  {
     id: 'REQ-13 (v2.3.3)',
     severity: 'v2.3.3 SAVED SEARCHES BAR BUTTON & MARQUEE DROPDOWN',
     file: 'danbooru_service.py (SettingsDialog._build_display_tab & render_saved_dropdown)',
@@ -376,6 +619,9 @@ export default function App() {
   const [simScreensState, setSimScreensState] = useState<{
     screen_1: {
       enabled: boolean;
+      pauseFullscreen: boolean;
+      vsync: boolean;
+      targetFps: string;
       paused: boolean;
       tags: string;
       appliedTags: string;
@@ -384,6 +630,9 @@ export default function App() {
     };
     screen_2: {
       enabled: boolean;
+      pauseFullscreen: boolean;
+      vsync: boolean;
+      targetFps: string;
       paused: boolean;
       tags: string;
       appliedTags: string;
@@ -393,6 +642,9 @@ export default function App() {
   }>({
     screen_1: {
       enabled: true,
+      pauseFullscreen: true,
+      vsync: true,
+      targetFps: '60',
       paused: false,
       tags: 'scenery no_humans highres',
       appliedTags: 'scenery no_humans highres',
@@ -401,10 +653,13 @@ export default function App() {
     },
     screen_2: {
       enabled: true,
+      pauseFullscreen: true,
+      vsync: false,
+      targetFps: '120',
       paused: false,
       tags: 'genshin_impact furina_(genshin_impact) wlop',
       appliedTags: 'genshin_impact furina_(genshin_impact) wlop',
-      mode: 'slideshow',
+      mode: 'polaroid',
       postIdx: 0,
     },
   });
@@ -418,6 +673,89 @@ export default function App() {
   const [simTagInputFocused, setSimTagInputFocused] = useState(false);
   const [simAutoSearchNotice, setSimAutoSearchNotice] = useState<string | null>(null);
   const [simDuplicateToast, setSimDuplicateToast] = useState<string | null>(null);
+
+  // Interactive Masonry Mondrian vs. Uncropped Rows Simulator State
+  const [simMasonryLayout, setSimMasonryLayout] = useState<'mondrian' | 'rows'>('mondrian');
+  const [simMasonryEdgeFill, setSimMasonryEdgeFill] = useState<'blur' | 'black'>('blur');
+  const [simMasonryTiles, setSimMasonryTiles] = useState<number>(12);
+  const [simMasonryGap, setSimMasonryGap] = useState<number>(4);
+  const [simMasonryDelay, setSimMasonryDelay] = useState<number>(5);
+  const [simFlipGeneration, setSimFlipGeneration] = useState<number>(0);
+  const [simLastFlipScope, setSimLastFlipScope] = useState<'local' | 'global'>('local');
+  const [simFlippedTileIdx, setSimFlippedTileIdx] = useState<number | null>(null);
+  const [simBoxLoadState, setSimBoxLoadState] = useState<'done' | 'closed' | 'opening' | 'fading'>('done');
+
+  const triggerSimMasonryBoxLoad = () => {
+    setSimBoxLoadState('closed');
+    setTimeout(() => setSimBoxLoadState('opening'), 650);
+    setTimeout(() => setSimBoxLoadState('fading'), 1150);
+    setTimeout(() => setSimBoxLoadState('done'), 1700);
+  };
+
+  const estimateRowsFromTiles = (tiles: number): number => {
+    const clampedTiles = Math.max(4, Math.min(36, Math.round(tiles || 12)));
+    return Math.max(2, Math.min(15, Math.round(Math.sqrt(clampedTiles * 0.68))));
+  };
+
+  const getSimTargetTileBounds = (target: number) => {
+    const base = Math.max(4, Math.min(36, Math.round(target || 12)));
+    const delta = Math.max(1, Math.round(base * 0.25));
+    const minCount = Math.max(4, base - delta);
+    const maxCount = Math.min(36, base + delta);
+    return { target: base, minCount, maxCount, delta };
+  };
+
+  const simTileBounds = getSimTargetTileBounds(simMasonryTiles);
+  // Active tile count dynamically adapts within [minCount, maxCount] around Target Tile Count
+  const simActiveTileCount = Math.max(
+    simTileBounds.minCount,
+    Math.min(
+      simTileBounds.maxCount,
+      simTileBounds.target + ((simFlipGeneration % 3) - 1) * Math.min(2, simTileBounds.delta)
+    )
+  );
+
+  const handleToggleSimMasonryLayout = () => {
+    if (simMasonryLayout === 'mondrian') {
+      setSimMasonryLayout('rows');
+      setSimAutoSearchNotice(
+        `Switched Masonry Layout to Rows → Target Tile Count (${simMasonryTiles}, ±25% range ${simTileBounds.minCount}–${simTileBounds.maxCount}) active for uncropped rows`
+      );
+    } else {
+      setSimMasonryLayout('mondrian');
+      setSimAutoSearchNotice(
+        `Switched Masonry Layout to Mondrian → Mondrian Edge Fill (${simMasonryEdgeFill === 'black' ? 'Black' : 'Blur'}) & Target Tile Count (${simMasonryTiles}) active`
+      );
+    }
+  };
+
+  const handleToggleSimMasonryEdgeFill = () => {
+    setSimMasonryEdgeFill((prev) => {
+      const next = prev === 'blur' ? 'black' : 'blur';
+      setSimAutoSearchNotice(
+        `Toggled Mondrian Edge Fill to: ${next === 'black' ? 'Black (#0b0b0d gap-matched solid fill)' : 'Blur (ambient color-matched edge blur)'}`
+      );
+      return next;
+    });
+  };
+
+  const handleSimulateTileFlip = (forcedIdx?: number) => {
+    const nextGen = simFlipGeneration + 1;
+    const chosenIdx = forcedIdx !== undefined ? forcedIdx : nextGen % Math.max(1, simActiveTileCount);
+    const nextScope: 'local' | 'global' = nextGen % 3 === 0 ? 'global' : 'local';
+    setSimFlipGeneration(nextGen);
+    setSimFlippedTileIdx(chosenIdx);
+    setSimLastFlipScope(nextScope);
+    setSimAutoSearchNotice(
+      simMasonryLayout === 'mondrian'
+        ? `Tile #${chosenIdx + 1} flipped → ${
+            nextScope === 'local'
+              ? 'Local group reshuffled & resized adjacent tiles (0.0% edge blur)'
+              : `Escalated to full-grid reshuffle (${simActiveTileCount} active tiles within ${simTileBounds.minCount}–${simTileBounds.maxCount} target range)`
+          }`
+        : `Tile #${chosenIdx + 1} flipped in Rows mode → Uncropped DP row heights re-balanced (${simActiveTileCount} tiles across ${estimateRowsFromTiles(simActiveTileCount)} rows, 0% crop)`
+    );
+  };
 
   useEffect(() => {
     FILE_LIST.forEach(async (item) => {
@@ -583,10 +921,10 @@ export default function App() {
         <div>
           <h1 className="text-base font-bold tracking-tight flex items-center gap-2">
             <LayoutGrid className="w-5 h-5 text-blue-500" />
-            Danbooru Wallpaper Suite v2.3.3 — Saved Searches Bar Button, Marquee Rows, Duplicate Toast &amp; Dark Mode Tabs
+            Danbooru Wallpaper Suite v2.3.10 — Solver Optimization, Pause Resource Guard &amp; Fullscreen Auto-Pause
           </h1>
           <p className={`text-xs mt-0.5 ${isDark ? 'text-zinc-400' : 'text-zinc-600'}`}>
-            Saved Searches ▾ Above TAGS (&quot;Save Search Tags&quot; + 🗑 Delete + Continuous Marquee + 2s Duplicate Toast) • Dark Mode Tabs w/ 1px White Outline &amp; 2px Gap
+            Optimized Mondrian &amp; Row Tree Solvers • Pause Stops Background Processes • Fullscreen App Auto-Pause Switch • Single-Row Masonry Buttons
           </p>
         </div>
 
@@ -727,19 +1065,19 @@ export default function App() {
             >
               <div className="font-semibold flex items-center gap-1.5 text-emerald-500">
                 <Wrench className="w-3.5 h-3.5" />
-                Verified v2.3.3 Updates
+                Verified v2.3.10 Updates
               </div>
               <div>
-                • <strong>Saved Searches ▾ Button</strong> above <code>TAGS =</code> spanning between the Page/Pool badge and Refresh button (uniform 28px height).
+                • <strong>Optimized Solvers</strong>: Bounded LRU subtree memoization, branch-and-bound pruning &amp; O(1) incremental row swap delta math.
               </div>
               <div>
-                • <strong>&quot;Save Search Tags&quot;</strong> top option + 2s <strong>&quot;Saved Search Tags already exists&quot;</strong> popup toast + <strong>🗑</strong> trash-can delete buttons + continuous horizontal marquee scrolling.
+                • <strong>Pause Resource Conservation</strong>: Pressing Pause stops tag pool fetches, aborts preloads/decodes, and pauses video &amp; WAAPI.
               </div>
               <div>
-                • <strong>Dark Mode Settings Tabs</strong> with 1px contrasting white outline and 2px gap between tabs.
+                • <strong>Fullscreen App Auto-Pause</strong>: Per-screen switch on the right side of the enable row pauses wallpaper during fullscreen games/videos.
               </div>
               <div>
-                • <strong>Dynamic 1–5 Line TAGS Box</strong> &amp; <strong>Focus-Out Auto-Search</strong> when caret stops blinking.
+                • <strong>Masonry Row &amp; Window Height</strong>: Combined <code>Masonry Layout: ...</code> &amp; <code>Edge Fill: ...</code> on one row + 760px window height.
               </div>
             </div>
           </aside>
@@ -884,26 +1222,152 @@ export default function App() {
                 </select>
               </div>
 
-              {/* 2. Display Wallpaper Checkbox */}
-              <div className="flex items-center justify-between">
-                <label className="flex items-center gap-2 font-bold cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={curScreenState.enabled}
-                    onChange={(e) =>
-                      setSimScreensState((prev) => ({
-                        ...prev,
-                        [simScreen]: { ...prev[simScreen], enabled: e.target.checked },
-                      }))
-                    }
-                    className="w-4 h-4 accent-[#0067c0]"
-                  />
-                  Display wallpaper on this screen
-                </label>
-                {sharedPoolActive && (
-                  <span className="text-[11px] font-semibold text-emerald-500">
-                    ⚡ Shared Tag Pool Active (Screen 1 &amp; Screen 2 reuse 1 API fetch)
-                  </span>
+              {/* 2. Display Wallpaper On/Off Slide Switch (Left) + Pause During Full Screen Application Switch (Right) */}
+              <div className="flex flex-wrap items-center justify-between gap-3 pt-0.5">
+                <div
+                  onClick={() => {
+                    const nextEnabled = !curScreenState.enabled;
+                    setSimScreensState((prev) => ({
+                      ...prev,
+                      [simScreen]: { ...prev[simScreen], enabled: nextEnabled },
+                    }));
+                    setSimAutoSearchNotice(
+                      `Toggled 'Display wallpaper on this screen' slide switch on ${simScreen} to: ${nextEnabled ? 'ON' : 'OFF'}`
+                    );
+                  }}
+                  className="flex items-center gap-2.5 font-bold cursor-pointer select-none"
+                >
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={curScreenState.enabled}
+                    className={`relative w-[42px] h-[22px] rounded-full transition-colors duration-150 border cursor-pointer shrink-0 ${
+                      curScreenState.enabled
+                        ? 'bg-[#0067c0] border-[#005da6]'
+                        : isDark
+                        ? 'bg-[#34343e] border-[#323238]'
+                        : 'bg-[#c6c6ce] border-[#b8b8c0]'
+                    }`}
+                  >
+                    <span
+                      className={`block w-3.5 h-3.5 rounded-full bg-white transition-transform duration-150 ${
+                        curScreenState.enabled ? 'translate-x-[21px]' : 'translate-x-[3px]'
+                      }`}
+                    />
+                  </button>
+                  <span>Display wallpaper on this screen</span>
+                </div>
+
+                {/* Right side of the same row: Pause during full screen application switch */}
+                <div
+                  onClick={() => {
+                    const nextPauseFs = !curScreenState.pauseFullscreen;
+                    setSimScreensState((prev) => ({
+                      ...prev,
+                      [simScreen]: { ...prev[simScreen], pauseFullscreen: nextPauseFs },
+                    }));
+                    setSimAutoSearchNotice(
+                      `Toggled 'Pause during full screen application' on ${simScreen} to: ${
+                        nextPauseFs ? 'ON (Auto-pauses during fullscreen games/videos)' : 'OFF'
+                      }`
+                    );
+                  }}
+                  className="flex items-center gap-2.5 font-bold cursor-pointer select-none"
+                >
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={curScreenState.pauseFullscreen}
+                    className={`relative w-[42px] h-[22px] rounded-full transition-colors duration-150 border cursor-pointer shrink-0 ${
+                      curScreenState.pauseFullscreen
+                        ? 'bg-[#0067c0] border-[#005da6]'
+                        : isDark
+                        ? 'bg-[#34343e] border-[#323238]'
+                        : 'bg-[#c6c6ce] border-[#b8b8c0]'
+                    }`}
+                  >
+                    <span
+                      className={`block w-3.5 h-3.5 rounded-full bg-white transition-transform duration-150 ${
+                        curScreenState.pauseFullscreen ? 'translate-x-[21px]' : 'translate-x-[3px]'
+                      }`}
+                    />
+                  </button>
+                  <span>Pause during full screen application</span>
+                </div>
+              </div>
+              {sharedPoolActive && (
+                <div className="text-[11px] font-semibold text-emerald-500">
+                  ⚡ Shared Tag Pool Active (Screen 1 &amp; Screen 2 reuse 1 API fetch)
+                </div>
+              )}
+
+              {/* 2b. Per-Screen V-Sync Button ("V-Sync On" / "V-Sync Off") & Conditional Target FPS Input Box to the Right */}
+              <div className="flex items-center gap-3 pb-0.5">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const nextVsync = !curScreenState.vsync;
+                    setSimScreensState((prev) => ({
+                      ...prev,
+                      [simScreen]: { ...prev[simScreen], vsync: nextVsync },
+                    }));
+                    setSimAutoSearchNotice(
+                      nextVsync
+                        ? `Switched V-Sync on ${simScreen} to: V-Sync On (Locked to native monitor refresh rate)`
+                        : `Switched V-Sync on ${simScreen} to: V-Sync Off (Paced to Target FPS: ${curScreenState.targetFps} FPS)`
+                    );
+                  }}
+                  className={`px-3.5 py-1 font-bold text-xs cursor-pointer transition-colors shrink-0 ${
+                    curScreenState.vsync
+                      ? 'bg-[#0067c0] hover:bg-[#005da6] text-white'
+                      : isDark
+                      ? 'bg-[#232329] hover:bg-[#2e2e36] text-[#f3f3f5] border border-[#323238]'
+                      : 'bg-[#e8e8ed] hover:bg-[#dcdce2] text-[#1c1c1c] border border-[#b8b8c0]'
+                  }`}
+                >
+                  {curScreenState.vsync ? 'V-Sync On' : 'V-Sync Off'}
+                </button>
+
+                {!curScreenState.vsync && (
+                  <div className="flex items-center gap-2">
+                    <label className="font-bold whitespace-nowrap">Target FPS (15 – 240):</label>
+                    <input
+                      type="number"
+                      min={15}
+                      max={240}
+                      value={curScreenState.targetFps}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        setSimScreensState((prev) => ({
+                          ...prev,
+                          [simScreen]: { ...prev[simScreen], targetFps: val },
+                        }));
+                      }}
+                      onBlur={() => {
+                        const parsed = Number(curScreenState.targetFps);
+                        const clamped = Number.isFinite(parsed)
+                          ? Math.max(15, Math.min(240, Math.round(parsed)))
+                          : 60;
+                        setSimScreensState((prev) => ({
+                          ...prev,
+                          [simScreen]: { ...prev[simScreen], targetFps: String(clamped) },
+                        }));
+                        setSimAutoSearchNotice(
+                          `Set Target FPS on ${simScreen} to ${clamped} FPS (V-Sync Off)`
+                        );
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          (e.target as HTMLInputElement).blur();
+                        }
+                      }}
+                      className={`w-16 px-2 py-1 border font-mono text-xs font-bold text-center tabular-nums outline-none focus:border-[#0067c0] ${
+                        isDark
+                          ? 'bg-[#1c1c21] border-[#323238] text-zinc-100'
+                          : 'bg-white border-[#b8b8c0] text-zinc-900'
+                      }`}
+                    />
+                  </div>
                 )}
               </div>
 
@@ -932,7 +1396,7 @@ export default function App() {
                     {!curScreenState.enabled
                       ? '○ Screen Disabled (No Fetch)'
                       : curScreenState.paused
-                      ? '⏸ Screen Paused'
+                      ? '⏸ Paused (BG Processes Stopped)'
                       : '✔ P:1 (84 pooled)'}
                   </div>
 
@@ -1016,12 +1480,18 @@ export default function App() {
                   </button>
                   <button
                     type="button"
-                    onClick={() =>
+                    onClick={() => {
+                      const nextPaused = !curScreenState.paused;
                       setSimScreensState((prev) => ({
                         ...prev,
-                        [simScreen]: { ...prev[simScreen], paused: !prev[simScreen].paused },
-                      }))
-                    }
+                        [simScreen]: { ...prev[simScreen], paused: nextPaused },
+                      }));
+                      setSimAutoSearchNotice(
+                        nextPaused
+                          ? `Paused ${simScreen} → Stopped background tag pool fetches, aborted in-flight preloads/decodes, and paused video & WAAPI animations`
+                          : `Resumed ${simScreen} → Restarted background preloader, tag pool sync, and animations`
+                      );
+                    }}
                     className={`h-7 px-3 border font-bold cursor-pointer flex items-center justify-center gap-1 shrink-0 ${
                       curScreenState.paused
                         ? 'bg-[#0067c0] border-[#0067c0] text-white'
@@ -1260,12 +1730,18 @@ export default function App() {
 
                 {/* 3c. Permanent 4-Layer Scrollable Displayed Media Tags Box */}
                 <div className="space-y-1 pt-1">
-                  <div className="flex items-center justify-between text-[11px] font-bold opacity-75">
-                    <span>DISPLAYED MEDIA TAGS (CLICK TAG TO ADD TO SEARCH):</span>
+                  <div className="flex items-center justify-between text-xs font-bold">
+                    <span className="opacity-85">DISPLAYED MEDIA TAGS (CLICK TO ADD):</span>
                     {curScreenState.enabled && (
-                      <span>
+                      <a
+                        href={`https://danbooru.donmai.us/posts/${curMedia.postId}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="underline cursor-pointer text-[#0067c0] dark:text-[#4da6ff] hover:text-[#009be6]"
+                        title={`Click to open https://danbooru.donmai.us/posts/${curMedia.postId} in default web browser`}
+                      >
                         Post #{curMedia.postId} ({curMedia.tags.length} tags)
-                      </span>
+                      </a>
                     )}
                   </div>
                   <div
@@ -1295,6 +1771,336 @@ export default function App() {
                   </div>
                 </div>
               </div>
+
+              {/* 4. Display Mode Selector & Masonry Layout Section (Mondrian vs. Uncropped Rows) */}
+              <div className="pt-2 border-t border-zinc-700/30 space-y-2.5">
+                <div className="flex items-center justify-between gap-4">
+                  <label className="font-bold w-48">Display Mode:</label>
+                  <select
+                    value={curScreenState.mode}
+                    onChange={(e) =>
+                      setSimScreensState((prev) => ({
+                        ...prev,
+                        [simScreen]: { ...prev[simScreen], mode: e.target.value },
+                      }))
+                    }
+                    className={`flex-1 px-2.5 py-1.5 rounded border font-semibold ${
+                      isDark ? 'bg-[#1c1c21] border-[#323238] text-zinc-100' : 'bg-white border-[#b8b8c0] text-zinc-900'
+                    }`}
+                  >
+                    <option value="masonry">masonry</option>
+                    <option value="scroll">scroll</option>
+                    <option value="polaroid">polaroid</option>
+                    <option value="slideshow">slideshow</option>
+                  </select>
+                </div>
+
+                {/* MASONRY LAYOUT SETTINGS */}
+                <div className="pt-1 space-y-2.5">
+                  <div className="text-[11px] font-bold tracking-wide opacity-70">
+                    MASONRY LAYOUT SETTINGS (UNCROPPED 3D Y-AXIS FLIP &amp; ZERO-BLUR RESHUFFLE)
+                  </div>
+
+                  {/* Combined Single Row: Masonry Layout & Edge Fill Buttons */}
+                  <div className="grid grid-cols-2 gap-2.5">
+                    <button
+                      type="button"
+                      onClick={handleToggleSimMasonryLayout}
+                      className="py-1.5 px-3 bg-[#0067c0] hover:bg-[#005da6] text-white font-bold rounded-none cursor-pointer text-center transition-colors"
+                    >
+                      {simMasonryLayout === 'rows'
+                        ? 'Masonry Layout: Rows'
+                        : 'Masonry Layout: Mondrian'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleToggleSimMasonryEdgeFill}
+                      className="py-1.5 px-3 bg-[#0067c0] hover:bg-[#005da6] text-white font-bold rounded-none cursor-pointer text-center transition-colors"
+                    >
+                      {simMasonryEdgeFill === 'black'
+                        ? 'Edge Fill: Black'
+                        : 'Edge Fill: Blur'}
+                    </button>
+                  </div>
+
+                  {/* Standard Target Tile Count (4 - 36) Row for BOTH Mondrian and Rows */}
+                  <div className="flex items-center justify-between gap-4">
+                    <label className="w-48">Target Tile Count (4 – 36):</label>
+                    <div className="flex-1 flex items-center gap-2">
+                      <input
+                        type="number"
+                        min={4}
+                        max={36}
+                        value={simMasonryTiles}
+                        onChange={(e) => {
+                          const raw = Number(e.target.value);
+                          setSimMasonryTiles(Math.max(4, Math.min(36, Math.round(raw || 4))));
+                        }}
+                        className={`w-16 px-2 py-1 border font-mono text-xs tabular-nums ${
+                          isDark ? 'bg-[#1c1c21] border-[#323238] text-zinc-100' : 'bg-white border-[#b8b8c0] text-zinc-900'
+                        }`}
+                      />
+                      <input
+                        type="range"
+                        min={4}
+                        max={36}
+                        step={1}
+                        value={simMasonryTiles}
+                        onChange={(e) => {
+                          setSimMasonryTiles(Number(e.target.value));
+                        }}
+                        className="flex-1 accent-[#0067c0] cursor-pointer"
+                      />
+                    </div>
+                  </div>
+
+                  {/* Gap (0 - 10 px) */}
+                  <div className="flex items-center justify-between gap-4">
+                    <label className="w-48">Gap (0 – 10 px):</label>
+                    <div className="flex-1 flex items-center gap-2">
+                      <input
+                        type="number"
+                        min={0}
+                        max={10}
+                        value={simMasonryGap}
+                        onChange={(e) => setSimMasonryGap(Math.max(0, Math.min(10, Math.round(Number(e.target.value) || 0))))}
+                        className={`w-16 px-2 py-1 border font-mono text-xs tabular-nums ${
+                          isDark ? 'bg-[#1c1c21] border-[#323238] text-zinc-100' : 'bg-white border-[#b8b8c0] text-zinc-900'
+                        }`}
+                      />
+                      <input
+                        type="range"
+                        min={0}
+                        max={10}
+                        step={1}
+                        value={simMasonryGap}
+                        onChange={(e) => setSimMasonryGap(Number(e.target.value))}
+                        className="flex-1 accent-[#0067c0] cursor-pointer"
+                      />
+                    </div>
+                  </div>
+
+                  {/* Delay (1 - 60 s) */}
+                  <div className="flex items-center justify-between gap-4">
+                    <label className="w-48">Delay (1 – 60 s):</label>
+                    <div className="flex-1 flex items-center gap-2">
+                      <input
+                        type="number"
+                        min={1}
+                        max={60}
+                        value={simMasonryDelay}
+                        onChange={(e) => setSimMasonryDelay(Math.max(1, Math.min(60, Math.round(Number(e.target.value) || 1))))}
+                        className={`w-16 px-2 py-1 border font-mono text-xs tabular-nums ${
+                          isDark ? 'bg-[#1c1c21] border-[#323238] text-zinc-100' : 'bg-white border-[#b8b8c0] text-zinc-900'
+                        }`}
+                      />
+                      <input
+                        type="range"
+                        min={1}
+                        max={60}
+                        step={1}
+                        value={simMasonryDelay}
+                        onChange={(e) => setSimMasonryDelay(Number(e.target.value))}
+                        className="flex-1 accent-[#0067c0] cursor-pointer"
+                      />
+                    </div>
+                  </div>
+
+                  {/* Live Uncropped Masonry Stage Geometry Preview with Interactive Flip & Reshuffle */}
+                  <div
+                    className={`mt-2 p-2.5 rounded border space-y-2 ${
+                      isDark ? 'border-[#323238] bg-[#0b0b0d]' : 'border-[#b8b8c0] bg-[#101014]'
+                    }`}
+                  >
+                    <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-zinc-300 font-semibold">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span>
+                          Live Stage Preview:{' '}
+                          {simMasonryLayout === 'rows'
+                            ? `Rows Mode (${simActiveTileCount} Active Tiles [Target ${simMasonryTiles} ±25%: ${simTileBounds.minCount}–${simTileBounds.maxCount}] • Uncropped object-fit: contain • 0% Crop)`
+                            : `Mondrian Mode (${simActiveTileCount} Active Tiles [Target ${simMasonryTiles} ±25%: ${simTileBounds.minCount}–${simTileBounds.maxCount}] • Edge Fill: ${
+                                simMasonryEdgeFill === 'black' ? 'Black #0b0b0d' : 'Blur'
+                              })`}
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => triggerSimMasonryBoxLoad()}
+                          className="px-2.5 py-1 bg-amber-700 hover:bg-amber-600 text-white font-bold text-[11px] cursor-pointer transition-colors"
+                        >
+                          Replay Cardboard Box Load
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleSimulateTileFlip()}
+                          className="px-2.5 py-1 bg-[#0067c0] hover:bg-[#005da6] text-white font-bold text-[11px] cursor-pointer transition-colors"
+                        >
+                          Flip Next Tile (Reshuffle &amp; Resize)
+                        </button>
+                      </div>
+                    </div>
+
+                    <div
+                      className="relative w-full h-60 bg-[#0b0b0d] flex flex-col overflow-hidden p-1 border border-zinc-800"
+                      style={{ gap: `${simMasonryGap}px` }}
+                    >
+                      {simBoxLoadState !== 'done' && (
+                        <div
+                          className={`absolute inset-0 z-20 bg-[#0b0b0d] flex flex-col items-center justify-center transition-opacity duration-500 ${
+                            simBoxLoadState === 'fading' ? 'opacity-0' : 'opacity-100'
+                          }`}
+                        >
+                          <svg width="112" height="112" viewBox="0 0 64 64" className="overflow-visible">
+                            <ellipse cx="32" cy="57.5" rx="22" ry="4.2" fill="rgba(0,0,0,0.55)" />
+                            <polygon points="10,22 32,11 32,33" fill="#634121" stroke="#3d2814" strokeWidth="1" />
+                            <polygon points="32,11 54,22 32,33" fill="#734e2a" stroke="#3d2814" strokeWidth="1" />
+                            {simBoxLoadState === 'closed' ? (
+                              <>
+                                <polygon points="10,22 32,11 32,22 10,22" fill="#c9965d" stroke="#3d2814" strokeWidth="1.15" />
+                                <polygon points="32,11 32,22 54,22 54,22" fill="#be8b52" stroke="#3d2814" strokeWidth="1.15" />
+                                <polygon points="10,22 32,33 32,56 10,44" fill="#c28e56" stroke="#3d2814" strokeWidth="1.15" />
+                                <polygon points="32,33 54,22 54,44 32,56" fill="#96693c" stroke="#3d2814" strokeWidth="1.15" />
+                                <polygon points="10,22 32,33 32,22 10,22" fill="#d4a26a" stroke="#3d2814" strokeWidth="1.15" />
+                                <polygon points="32,33 54,22 54,22 32,22" fill="#c28e56" stroke="#3d2814" strokeWidth="1.15" />
+                                <polygon points="11,21.5 53,21.5 53,23.2 11,23.2" fill="#825832" />
+                                <polygon points="30,32 34,32 34,42 30,42" fill="#825832" stroke="#3d2814" strokeWidth="0.9" />
+                              </>
+                            ) : (
+                              <>
+                                <polygon points="10,22 32,11 26,2 4,12" fill="#b9854d" stroke="#3d2814" strokeWidth="1.15" />
+                                <polygon points="32,11 38,2 60,12 54,22" fill="#ad7a44" stroke="#3d2814" strokeWidth="1.15" />
+                                <polygon points="10,22 32,33 32,56 10,44" fill="#c28e56" stroke="#3d2814" strokeWidth="1.15" />
+                                <polygon points="32,33 54,22 54,44 32,56" fill="#96693c" stroke="#3d2814" strokeWidth="1.15" />
+                                <polygon points="10,22 32,33 26,41 4,30" fill="#d4a26a" stroke="#3d2814" strokeWidth="1.15" />
+                                <polygon points="32,33 54,22 60,30 38,41" fill="#c28e56" stroke="#3d2814" strokeWidth="1.15" />
+                                <polygon points="30,32 34,32 34,42 30,42" fill="#825832" stroke="#3d2814" strokeWidth="0.9" />
+                              </>
+                            )}
+                          </svg>
+                        </div>
+                      )}
+                      {(() => {
+                        const baseAspects = [
+                          1.78, 0.75, 1.33, 1.5, 0.8, 1.6, 1.25, 0.7, 1.45, 1.85, 0.9, 1.38,
+                          1.65, 0.78, 1.2, 1.55, 0.85, 1.4,
+                        ];
+                        const rotatedAspects = Array.from({ length: simActiveTileCount }, (_, idx) => {
+                          const raw = baseAspects[(idx + simFlipGeneration * 2) % baseAspects.length];
+                          return idx === simFlippedTileIdx ? Number((1 / raw).toFixed(2)) : raw;
+                        });
+
+                        if (simMasonryLayout === 'rows') {
+                          const numRows = estimateRowsFromTiles(simActiveTileCount);
+                          const rows: { idx: number; aspect: number }[][] = Array.from({ length: numRows }, () => []);
+                          rotatedAspects.forEach((asp, idx) => {
+                            const r = Math.min(numRows - 1, Math.floor((idx / simActiveTileCount) * numRows));
+                            rows[r].push({ idx, aspect: asp });
+                          });
+
+                          return rows.map((rowTiles, rIdx) => {
+                            const sumA = rowTiles.reduce((acc, t) => acc + t.aspect, 0) || 1;
+                            const rowWeight = 1 / sumA;
+                            return (
+                              <div
+                                key={rIdx}
+                                className="w-full flex items-stretch overflow-hidden transition-all duration-300"
+                                style={{
+                                  flexGrow: rowWeight,
+                                  flexBasis: 0,
+                                  gap: `${simMasonryGap}px`,
+                                }}
+                              >
+                                {rowTiles.map((t) => {
+                                  const isFlipped = t.idx === simFlippedTileIdx;
+                                  return (
+                                    <button
+                                      key={t.idx}
+                                      type="button"
+                                      onClick={() => handleSimulateTileFlip(t.idx)}
+                                      style={{ flexGrow: t.aspect, flexBasis: 0 }}
+                                      className={`bg-[#0b0b0d] border flex flex-col items-center justify-center overflow-hidden text-[10px] font-mono cursor-pointer transition-all duration-300 ${
+                                        isFlipped
+                                          ? 'border-emerald-400 text-emerald-300 bg-emerald-950/30'
+                                          : 'border-blue-500/30 text-blue-300/90 hover:border-blue-400'
+                                      }`}
+                                      title={`Click to flip Tile #${t.idx + 1} (Aspect ${t.aspect.toFixed(2)}:1 — Uncropped)`}
+                                    >
+                                      <span className="font-bold">#{t.idx + 1}</span>
+                                      {numRows <= 6 && <span className="opacity-80">{t.aspect.toFixed(2)}:1</span>}
+                                    </button>
+                                  );
+                                })}
+                              </div>
+                            );
+                          });
+                        }
+
+                        // Mondrian BSP Group Simulation: partition active tiles into aspect-locked groups
+                        const numBands = Math.max(2, Math.min(4, Math.round(Math.sqrt(simActiveTileCount * 0.6))));
+                        const bands: { idx: number; aspect: number }[][] = Array.from({ length: numBands }, () => []);
+                        rotatedAspects.forEach((asp, idx) => {
+                          const b = Math.min(numBands - 1, Math.floor((idx / simActiveTileCount) * numBands));
+                          bands[b].push({ idx, aspect: asp });
+                        });
+
+                        return bands.map((bandTiles, bIdx) => {
+                          const sumBandA = bandTiles.reduce((acc, t) => acc + t.aspect, 0) || 1;
+                          const invRowH = 1 / Math.max(0.4, sumBandA);
+                          return (
+                            <div
+                              key={bIdx}
+                              className="w-full flex items-stretch overflow-hidden transition-all duration-300"
+                              style={{
+                                flexGrow: invRowH,
+                                flexBasis: 0,
+                                gap: `${simMasonryGap}px`,
+                              }}
+                            >
+                              {bandTiles.map((t) => {
+                                const isFlipped = t.idx === simFlippedTileIdx;
+                                const edgeStyle =
+                                  simMasonryEdgeFill === 'black'
+                                    ? 'bg-[#0b0b0d]'
+                                    : 'bg-gradient-to-br from-[#1b2234] via-[#121521] to-[#1e1b2e]';
+                                return (
+                                  <button
+                                    key={t.idx}
+                                    type="button"
+                                    onClick={() => handleSimulateTileFlip(t.idx)}
+                                    style={{ flexGrow: t.aspect, flexBasis: 0 }}
+                                    className={`${edgeStyle} border flex flex-col items-center justify-center overflow-hidden text-[10px] font-mono cursor-pointer transition-all duration-300 ${
+                                      isFlipped
+                                        ? 'border-emerald-400 text-emerald-300'
+                                        : 'border-indigo-500/35 text-indigo-200 hover:border-indigo-400'
+                                    }`}
+                                    title={`Click to flip Tile #${t.idx + 1} (Aspect ${t.aspect.toFixed(2)}:1 — Edge Fill: ${simMasonryEdgeFill.toUpperCase()})`}
+                                  >
+                                    <span className="font-bold">Tile #{t.idx + 1}</span>
+                                    <span className="text-[9px] opacity-80">{t.aspect.toFixed(2)}:1</span>
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          );
+                        });
+                      })()}
+                    </div>
+
+                    <div className="flex flex-wrap items-center justify-between gap-2 text-[10px] font-mono text-zinc-400">
+                      <span>
+                        Last Reflow Scope:{' '}
+                        <strong className="text-emerald-400">
+                          {simLastFlipScope === 'local'
+                            ? 'Tier 1 Local Subgroup Reorder & Resize (0.0% Edge Blur)'
+                            : 'Tier 2 Full-Grid BSP Re-Partition & Resize (0.0% Edge Blur)'}
+                        </strong>
+                      </span>
+                      <span>Click any tile above to flip it &amp; trigger a live reshuffle</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
         </div>
@@ -1309,7 +2115,7 @@ export default function App() {
           >
             <h2 className="text-sm font-bold flex items-center gap-2">
               <AlertTriangle className="w-4 h-4 text-blue-500" />
-              v2.3.3 Requirements Implementation Summary (Saved Searches Bar Button, Marquee Rows, Duplicate Toast &amp; Dark Mode Tabs)
+              v2.3.5 Security, Memory &amp; 64-Bit Ctypes Audit + Requirements Implementation Summary
             </h2>
           </div>
 

@@ -46,10 +46,12 @@ import shutil
 import time
 import base64
 import socket
+import ipaddress
+import webbrowser
 import ctypes
 from ctypes import wintypes
 from queue import Queue, Empty
-from collections import deque
+from collections import deque, OrderedDict
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 import tkinter as tk
 from tkinter import ttk
@@ -212,12 +214,16 @@ WS_CHILD = 0x40000000
 WS_VISIBLE = 0x10000000
 WS_CLIPSIBLINGS = 0x04000000
 WS_CLIPCHILDREN = 0x02000000
+WS_MAXIMIZE = 0x01000000
 
 WS_EX_APPWINDOW = 0x00040000
 WS_EX_TOOLWINDOW = 0x00000080
 WS_EX_LAYERED = 0x00080000
 WS_EX_NOACTIVATE = 0x08000000
 WS_EX_NOREDIRECTIONBITMAP = 0x00200000
+WS_EX_TRANSPARENT = 0x00000020
+
+DWMWA_CLOAKED = 14
 
 LWA_ALPHA = 0x00000002
 
@@ -315,6 +321,39 @@ user32.SetLayeredWindowAttributes.argtypes = [
 ]
 user32.SetLayeredWindowAttributes.restype = wintypes.BOOL
 
+user32.GetSystemMetrics.argtypes = [ctypes.c_int]
+user32.GetSystemMetrics.restype = ctypes.c_int
+
+user32.GetForegroundWindow.argtypes = []
+user32.GetForegroundWindow.restype = wintypes.HWND
+
+user32.GetDesktopWindow.argtypes = []
+user32.GetDesktopWindow.restype = wintypes.HWND
+
+user32.GetShellWindow.argtypes = []
+user32.GetShellWindow.restype = wintypes.HWND
+
+user32.IsIconic.argtypes = [wintypes.HWND]
+user32.IsIconic.restype = wintypes.BOOL
+
+user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+user32.GetWindowRect.restype = wintypes.BOOL
+
+user32.GetClientRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+user32.GetClientRect.restype = wintypes.BOOL
+
+user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+
+try:
+    dwmapi = ctypes.windll.dwmapi
+    dwmapi.DwmGetWindowAttribute.argtypes = [
+        wintypes.HWND, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD
+    ]
+    dwmapi.DwmGetWindowAttribute.restype = ctypes.c_long
+except Exception:
+    dwmapi = None
+
 GetWindowLongPtrW = getattr(user32, "GetWindowLongPtrW", user32.GetWindowLongW)
 GetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int]
 GetWindowLongPtrW.restype = LONG_PTR
@@ -323,6 +362,14 @@ GetWindowLongPtrW.restype = LONG_PTR
 SetWindowLongPtrW = getattr(user32, "SetWindowLongPtrW", user32.SetWindowLongW)
 SetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int, LONG_PTR]
 SetWindowLongPtrW.restype = LONG_PTR
+
+
+def to_signed_long_ptr(val32) -> LONG_PTR:
+    """Safely converts a 32-bit unsigned Win32 style/LPARAM mask into a signed LONG_PTR for 32-bit and 64-bit Python."""
+    u = int(val32) & 0xFFFFFFFF
+    signed_32 = (u - 0x100000000) if (u & 0x80000000) else u
+    return LONG_PTR(signed_32)
+
 
 INJECTION_LOCK = threading.Lock()
 
@@ -378,8 +425,43 @@ def enumerate_connected_monitors():
             "width": m["width"],
             "height": m["height"],
             "is_primary": m["is_primary"],
+            "device": m["device"],
         })
     return screens
+
+
+def refresh_connected_screens_preserving_ids():
+    """
+    Refreshes CONNECTED_SCREENS while preserving existing screen_id assignments
+    for monitors matched by Win32 device name (or coordinates) so active WEBVIEW_WINDOWS
+    and DESKTOP_HWNDS mappings never go out of sync at runtime.
+    """
+    global CONNECTED_SCREENS
+    fresh = enumerate_connected_monitors()
+    if not CONNECTED_SCREENS:
+        CONNECTED_SCREENS = fresh
+        return CONNECTED_SCREENS
+
+    old_by_device = {s.get("device"): s["id"] for s in CONNECTED_SCREENS if s.get("device")}
+    used_ids = set()
+    updated = []
+
+    for m in fresh:
+        dev = m.get("device")
+        matched_id = old_by_device.get(dev) if dev else None
+        if matched_id and matched_id not in used_ids:
+            used_ids.add(matched_id)
+            idx_num = int(matched_id.split("_")[-1]) if matched_id.split("_")[-1].isdigit() else m["index"]
+            primary_tag = " (Primary)" if m["is_primary"] else ""
+            m["id"] = matched_id
+            m["index"] = idx_num
+            m["name"] = f"Screen {idx_num}"
+            m["label"] = f"Screen {idx_num}: {m['width']}x{m['height']}{primary_tag}"
+        updated.append(m)
+
+    updated.sort(key=lambda s: s["index"])
+    CONNECTED_SCREENS = updated
+    return CONNECTED_SCREENS
 
 
 def has_webview_render_child(hwnd):
@@ -469,8 +551,13 @@ def resize_webview_child_containers(hwnd, screen_w, screen_h):
     """
     Forces all inner WinForms and Chromium host controls to fill (0, 0, screen_w, screen_h).
     """
-    lparam_size = (screen_h << 16) | (screen_w & 0xFFFF)
-    user32.SendMessageW(hwnd, WM_SIZE, SIZE_RESTORED, lparam_size)
+    safe_w = max(1, int(screen_w)) & 0xFFFF
+    safe_h = max(1, int(screen_h)) & 0xFFFF
+    lparam_size = (safe_h << 16) | safe_w
+    user32.SendMessageTimeoutW(
+        hwnd, WM_SIZE, SIZE_RESTORED, to_signed_long_ptr(lparam_size),
+        SMTO_NORMAL, 150, ctypes.byref(ctypes.c_size_t(0))
+    )
 
     class_buf = ctypes.create_unicode_buffer(256)
 
@@ -491,7 +578,7 @@ def resize_webview_child_containers(hwnd, screen_w, screen_h):
                     SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED | SWP_ASYNCWINDOWPOS
                 )
                 user32.SendMessageTimeoutW(
-                    child_hwnd, WM_SIZE, SIZE_RESTORED, lparam_size,
+                    child_hwnd, WM_SIZE, SIZE_RESTORED, to_signed_long_ptr(lparam_size),
                     SMTO_NORMAL, 150, ctypes.byref(ctypes.c_size_t(0))
                 )
         return True
@@ -537,28 +624,36 @@ def sync_all_screens_z_order_and_geometry(target_screen_id=None):
             user32.ScreenToClient(target_parent, ctypes.byref(pt))
 
             style = GetWindowLongPtrW(hwnd, GWL_STYLE) & 0xFFFFFFFF
+            was_visible = bool(style & WS_VISIBLE)
+            is_target = (target_screen_id is None or target_screen_id == sid or not was_visible)
             if enabled:
-                style |= WS_VISIBLE
-                SetWindowLongPtrW(hwnd, GWL_STYLE, LONG_PTR(style))
+                if not was_visible:
+                    style |= WS_VISIBLE
+                    SetWindowLongPtrW(hwnd, GWL_STYLE, to_signed_long_ptr(style))
 
-                if target_screen_id is None or target_screen_id == sid:
+                if is_target:
                     user32.SetWindowPos(
                         hwnd, insert_after, pt.x, pt.y, screen_w - 1, screen_h - 1,
                         SWP_NOACTIVATE | SWP_FRAMECHANGED | SWP_SHOWWINDOW | SWP_ASYNCWINDOWPOS
                     )
-                user32.SetWindowPos(
-                    hwnd, insert_after, pt.x, pt.y, screen_w, screen_h,
-                    SWP_NOACTIVATE | SWP_FRAMECHANGED | SWP_SHOWWINDOW | SWP_ASYNCWINDOWPOS
-                )
-                resize_webview_child_containers(hwnd, screen_w, screen_h)
-                user32.RedrawWindow(
-                    hwnd, None, None,
-                    RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_FRAME
-                )
+                    user32.SetWindowPos(
+                        hwnd, insert_after, pt.x, pt.y, screen_w, screen_h,
+                        SWP_NOACTIVATE | SWP_FRAMECHANGED | SWP_SHOWWINDOW | SWP_ASYNCWINDOWPOS
+                    )
+                    resize_webview_child_containers(hwnd, screen_w, screen_h)
+                    user32.RedrawWindow(
+                        hwnd, None, None,
+                        RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_FRAME
+                    )
+                else:
+                    user32.SetWindowPos(
+                        hwnd, insert_after, pt.x, pt.y, screen_w, screen_h,
+                        SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS
+                    )
                 insert_after = hwnd
             else:
                 style &= ~WS_VISIBLE
-                SetWindowLongPtrW(hwnd, GWL_STYLE, LONG_PTR(style))
+                SetWindowLongPtrW(hwnd, GWL_STYLE, to_signed_long_ptr(style))
                 user32.SetWindowPos(
                     hwnd, 0, pt.x, pt.y, screen_w, screen_h,
                     SWP_NOZORDER | SWP_NOACTIVATE | SWP_HIDEWINDOW | SWP_ASYNCWINDOWPOS
@@ -601,13 +696,13 @@ def attach_window_to_desktop(window, window_title, mon_x=0, mon_y=0, mon_w=None,
         style = GetWindowLongPtrW(hwnd, GWL_STYLE) & 0xFFFFFFFF
         clear_mask = WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_SYSMENU | WS_POPUP
         style = (style & ~clear_mask) | WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN
-        SetWindowLongPtrW(hwnd, GWL_STYLE, LONG_PTR(style))
+        SetWindowLongPtrW(hwnd, GWL_STYLE, to_signed_long_ptr(style))
 
         ex_style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & 0xFFFFFFFF
 
         if topo["is_win11_24h2"]:
             ex_style = (ex_style & ~WS_EX_APPWINDOW) | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED
-            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, LONG_PTR(ex_style))
+            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, to_signed_long_ptr(ex_style))
             user32.SetLayeredWindowAttributes(hwnd, 0, 255, LWA_ALPHA)
 
             target_parent = progman
@@ -641,7 +736,7 @@ def attach_window_to_desktop(window, window_title, mon_x=0, mon_y=0, mon_w=None,
             )
         else:
             ex_style = (ex_style & ~(WS_EX_APPWINDOW | WS_EX_LAYERED)) | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE
-            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, LONG_PTR(ex_style))
+            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, to_signed_long_ptr(ex_style))
 
             target_parent = topo["classic_workerw"] or topo["workerw_in_progman"] or progman
             user32.SetParent(hwnd, target_parent)
@@ -704,11 +799,52 @@ def cleanup_legacy_webview_profile():
 def get_default_properties_dict():
     return {
         "searchtags": {"order": 0, "text": "Search Tags", "type": "textinput", "value": "scenery no_humans"},
-        "schemecolor": {"order": 1, "text": "Scheme Color", "type": "color", "value": "0.04 0.04 0.05"},
-        "displaymode": {"order": 2, "text": "Display Mode", "type": "combo", "value": "scroll"},
-        "scrolldirection": {"order": 2, "text": "Scroll Direction", "type": "combo", "value": "left"},
-        "scrollspeed": {
+        "schemecolor": {"order": 1, "text": "ui_browse_properties_scheme_color", "type": "color", "value": "0.04 0.04 0.05"},
+        "vsync": {
+            "order": 2,
+            "text": "V-Sync",
+            "type": "bool",
+            "value": True,
+        },
+        "targetfps": {
+            "condition": "vsync.value == false",
             "order": 3,
+            "text": "Target FPS (15 – 240)",
+            "type": "slider",
+            "min": 15,
+            "max": 240,
+            "step": 1,
+            "value": 60,
+            "editable": True,
+        },
+        "displaymode": {
+            "order": 4,
+            "text": "Display Mode",
+            "type": "combo",
+            "value": "scroll",
+            "options": [
+                {"label": "Scrolling Slideshow", "value": "scroll"},
+                {"label": "Polaroid", "value": "polaroid"},
+                {"label": "Fullscreen Slideshow", "value": "slideshow"},
+                {"label": "Masonry", "value": "masonry"},
+            ],
+        },
+        "scrolldirection": {
+            "condition": "displaymode.value == 'scroll'",
+            "order": 5,
+            "text": "Scroll Direction",
+            "type": "combo",
+            "value": "left",
+            "options": [
+                {"label": "Scroll Left (←)", "value": "left"},
+                {"label": "Scroll Right (→)", "value": "right"},
+                {"label": "Scroll Up (↑)", "value": "up"},
+                {"label": "Scroll Down (↓)", "value": "down"},
+            ],
+        },
+        "scrollspeed": {
+            "condition": "displaymode.value == 'scroll'",
+            "order": 6,
             "text": "Scroll Speed (0.1 – 600 px/s)",
             "type": "slider",
             "min": 0.1,
@@ -716,18 +852,22 @@ def get_default_properties_dict():
             "step": 0.1,
             "precision": 2,
             "value": 120,
+            "editable": True,
         },
         "gapsize": {
-            "order": 4,
+            "condition": "displaymode.value == 'scroll'",
+            "order": 7,
             "text": "Image Gap (0 – 64 px)",
             "type": "slider",
             "min": 0,
             "max": 64,
             "step": 1,
             "value": 12,
+            "editable": True,
         },
         "dropspeed": {
-            "order": 5,
+            "condition": "displaymode.value == 'polaroid'",
+            "order": 8,
             "text": "Drop Speed (0.2 – 4.0)",
             "type": "slider",
             "min": 0.2,
@@ -735,36 +875,44 @@ def get_default_properties_dict():
             "step": 0.1,
             "precision": 2,
             "value": 1.0,
+            "editable": True,
         },
         "minsize": {
-            "order": 6,
+            "condition": "displaymode.value == 'polaroid'",
+            "order": 9,
             "text": "Minimum Size (120 – 600 px)",
             "type": "slider",
             "min": 120,
             "max": 600,
             "step": 1,
             "value": 220,
+            "editable": True,
         },
         "maxsize": {
-            "order": 7,
+            "condition": "displaymode.value == 'polaroid'",
+            "order": 10,
             "text": "Maximum Size (150 – 900 px)",
             "type": "slider",
             "min": 150,
             "max": 900,
             "step": 1,
             "value": 440,
+            "editable": True,
         },
         "dropdelay": {
-            "order": 8,
+            "condition": "displaymode.value == 'polaroid'",
+            "order": 11,
             "text": "Spawn/Drop Delay (0 – 600 s)",
             "type": "slider",
             "min": 0,
             "max": 600,
             "step": 1,
             "value": 0,
+            "editable": True,
         },
         "slideshowfade": {
-            "order": 9,
+            "condition": "displaymode.value == 'slideshow'",
+            "order": 12,
             "text": "Fade Transition (0 – 10 [0s – 1.0s])",
             "type": "slider",
             "min": 0,
@@ -772,18 +920,22 @@ def get_default_properties_dict():
             "step": 0.1,
             "precision": 1,
             "value": 5,
+            "editable": True,
         },
         "slideshowduration": {
-            "order": 10,
+            "condition": "displaymode.value == 'slideshow'",
+            "order": 13,
             "text": "Slide Display Time (0 – 600 s)",
             "type": "slider",
             "min": 0,
             "max": 600,
             "step": 1,
             "value": 10,
+            "editable": True,
         },
         "masonrylayout": {
-            "order": 11,
+            "condition": "displaymode.value == 'masonry'",
+            "order": 14,
             "text": "Masonry Layout",
             "type": "combo",
             "value": "mondrian",
@@ -792,32 +944,55 @@ def get_default_properties_dict():
                 {"label": "Rows", "value": "rows"},
             ],
         },
+        "masonryedgefill": {
+            "condition": "displaymode.value == 'masonry'",
+            "order": 15,
+            "text": "Edge Fill",
+            "type": "combo",
+            "value": "blur",
+            "options": [
+                {"label": "Blur", "value": "blur"},
+                {"label": "Black", "value": "black"},
+            ],
+        },
         "masonrytiles": {
-            "order": 12,
-            "text": "Tile Count (4 – 36)",
+            "condition": "displaymode.value == 'masonry'",
+            "order": 16,
+            "text": "Target Tile Count (4 – 36)",
             "type": "slider",
             "min": 4,
             "max": 36,
             "step": 1,
             "value": 12,
+            "editable": True,
         },
         "masonrygap": {
-            "order": 13,
+            "condition": "displaymode.value == 'masonry'",
+            "order": 17,
             "text": "Gap (0 – 10 px)",
             "type": "slider",
             "min": 0,
             "max": 10,
             "step": 1,
             "value": 4,
+            "editable": True,
         },
         "masonrydelay": {
-            "order": 14,
+            "condition": "displaymode.value == 'masonry'",
+            "order": 18,
             "text": "Delay (1 – 60 s)",
             "type": "slider",
             "min": 1,
             "max": 60,
             "step": 1,
             "value": 5,
+            "editable": True,
+        },
+        "pausefullscreen": {
+            "order": 19,
+            "text": "Pause during full screen application",
+            "type": "bool",
+            "value": True,
         },
     }
 
@@ -827,7 +1002,12 @@ DEFAULT_PROJECT_SCHEMA = {
     "general": {
         "properties": get_default_properties_dict()
     },
-    "screens": {},
+    "screens": {
+        "screen_1": {
+            "enabled": True,
+            "properties": get_default_properties_dict()
+        }
+    },
     "title": "Danbooru Infinite Scroll, Polaroid, Fullscreen Slideshow & Masonry",
     "type": "web",
     "version": 2,
@@ -897,8 +1077,11 @@ FORBIDDEN_PAYLOAD_SIGNATURES = (
     b"<!doctype html",
     b"<script",
     b"<svg",
+    b"<?xml",
+    b"#!",
     b"MZ",              # Windows PE executable / DLL header
     b"\x7fELF",         # Linux ELF binary
+    b"\xca\xfe\xba\xbe",  # Mach-O binary header
     b"PK\x03\x04",      # ZIP / JAR / PHAR archive header
     b"Rar!\x1a\x07",    # RAR archive
 )
@@ -974,30 +1157,24 @@ def verify_media_magic_bytes(header_bytes: bytes, is_range_continuation: bool = 
 
     head_probe = header_bytes[:512]
     head_lower = head_probe.lower()
+    head_stripped = head_lower.lstrip()
 
-    # Scan initial window for embedded PHP / HTML / Script polyglot tags
-    for sig in (b"<?php", b"<script", b"<!doctype html"):
-        if sig in head_lower:
-            return False, "", f"Malicious script/markup signature ({sig.decode('ascii', errors='ignore')}) detected in header"
-
-    if head_lower.lstrip().startswith((b"<?=", b"<html", b"<svg", b"<?xml")):
-        return False, "", "Disallowed markup/script prefix detected at start of stream"
+    # Enforce all FORBIDDEN_PAYLOAD_SIGNATURES against polyglot scripts, markup, and binary executables
+    for sig in FORBIDDEN_PAYLOAD_SIGNATURES:
+        if sig in (b"<?php", b"<script", b"<!doctype html"):
+            if sig in head_lower:
+                return False, "", f"Malicious script/markup signature ({sig.decode('ascii', errors='ignore')}) detected in header"
+        elif sig in (b"<?=", b"<html", b"<svg", b"<?xml", b"#!"):
+            if head_stripped.startswith(sig.lower()):
+                return False, "", f"Disallowed markup/script prefix ({sig.decode('ascii', errors='ignore')}) detected at start of stream"
+        elif head_probe.startswith(sig):
+            return False, "", f"Forbidden binary executable/archive header ({sig[:4]!r}) detected"
 
     if is_range_continuation:
         return True, "video/mp4", "MP4-Range"
 
     if len(header_bytes) < 8:
         return False, "", "Insufficient header bytes (minimum 8 bytes required)"
-
-    # Check for PE / ELF / Archive executable headers right at byte 0
-    if head_probe.startswith(b"MZ"):
-        return False, "", "Windows PE executable ('MZ') header detected"
-    if head_probe.startswith(b"\x7fELF"):
-        return False, "", "ELF executable header detected"
-    if head_probe.startswith(b"PK\x03\x04"):
-        return False, "", "ZIP/PHAR archive header detected"
-    if head_probe.startswith(b"Rar!\x1a\x07"):
-        return False, "", "RAR archive header detected"
 
     # 1. JPEG: FF D8 FF
     if head_probe.startswith(b"\xff\xd8\xff"):
@@ -1022,10 +1199,57 @@ def verify_media_magic_bytes(header_bytes: bytes, is_range_continuation: bool = 
     return False, "", "Unrecognized binary magic-byte signature"
 
 
-CLOUDFLARE_DOH_ENDPOINT = "https://cloudflare-dns.com/dns-query"
+VERIFIED_MP4_BYTE0_URLS = OrderedDict()
+MAX_VERIFIED_MP4_URLS = 512
+VERIFIED_MP4_LOCK = threading.Lock()
+
+
+def mark_mp4_url_verified(url: str):
+    """Records that an MP4 URL has passed byte-0 magic-byte inspection so subsequent HTTP Range seeks are permitted."""
+    if not url:
+        return
+    with VERIFIED_MP4_LOCK:
+        if url in VERIFIED_MP4_BYTE0_URLS:
+            VERIFIED_MP4_BYTE0_URLS.move_to_end(url)
+        else:
+            VERIFIED_MP4_BYTE0_URLS[url] = True
+            while len(VERIFIED_MP4_BYTE0_URLS) > MAX_VERIFIED_MP4_URLS:
+                VERIFIED_MP4_BYTE0_URLS.popitem(last=False)
+
+
+def is_mp4_url_verified(url: str) -> bool:
+    """Checks whether an MP4 URL has previously passed byte-0 magic-byte verification."""
+    if not url:
+        return False
+    with VERIFIED_MP4_LOCK:
+        if url in VERIFIED_MP4_BYTE0_URLS:
+            VERIFIED_MP4_BYTE0_URLS.move_to_end(url)
+            return True
+        return False
+
+
+def is_public_unicast_ipv4(ip_str: str) -> bool:
+    """Strictly verifies that an IPv4 address is globally routable and not private/loopback/link-local."""
+    try:
+        ip_obj = ipaddress.ip_address(str(ip_str or "").strip())
+        return (
+            isinstance(ip_obj, ipaddress.IPv4Address)
+            and ip_obj.is_global
+            and not ip_obj.is_private
+            and not ip_obj.is_loopback
+            and not ip_obj.is_link_local
+            and not ip_obj.is_multicast
+            and not ip_obj.is_reserved
+            and not ip_obj.is_unspecified
+        )
+    except ValueError:
+        return False
+
+
 CLOUDFLARE_DOH_IPS = ("1.1.1.1", "1.0.0.1")
 DOH_CACHE_TTL = 900  # 15 minutes
-DOH_CACHE = {}       # hostname -> (ip_str, expires_at)
+MAX_DOH_CACHE_ENTRIES = 128
+DOH_CACHE = OrderedDict()  # hostname -> (ip_str, expires_at)
 DOH_LOCK = threading.Lock()
 
 # Credentials are never hardcoded; pulled strictly from the Credentials tab (config.json)
@@ -1089,17 +1313,9 @@ DANBOORU_TAG_COLORS = {
     },
 }
 
-DANBOORU_CATEGORY_ORDER = (3, 4, 1, 5, 0)
-DANBOORU_CATEGORY_NAMES = {
-    3: "Copyright",
-    4: "Character",
-    1: "Artist",
-    5: "Meta",
-    0: "General",
-}
-
 # Global Tag Category Cache: tag_name (lowercase) -> category int (0, 1, 3, 4, 5)
-TAG_CATEGORY_CACHE = {
+# Bounded at MAX_TAG_CATEGORY_CACHE entries via LRU eviction (preserving SEEDED_TAG_CATEGORIES)
+SEEDED_TAG_CATEGORIES = {
     "scenery": 0,
     "no_humans": 0,
     "1girl": 0,
@@ -1116,10 +1332,13 @@ TAG_CATEGORY_CACHE = {
     "video": 5,
     "original": 3,
 }
+MAX_TAG_CATEGORY_CACHE = 10000
+TAG_CATEGORY_CACHE = OrderedDict(SEEDED_TAG_CATEGORIES)
 
 # Post ID -> list of (tag_name, category_id) tuples ordered by Copyright -> Character -> Artist -> Meta -> General
-POST_TAGS_CACHE = {}
-POST_TAGS_ORDER = deque(maxlen=2500)
+# Bounded at MAX_POST_TAGS_CACHE entries via OrderedDict LRU eviction to prevent unbounded memory cycling
+MAX_POST_TAGS_CACHE = 2500
+POST_TAGS_CACHE = OrderedDict()
 
 # Glossary Definitions for Logs Tab
 LOG_GLOSSARY_ENTRIES = [
@@ -1150,6 +1369,7 @@ PROP_SEQ = 1
 
 MAX_POOL_POSTS = 600
 MAX_SEEN_IDS = 1800
+MAX_TAG_POOLS = 16
 
 # Shared Tag Pools: canonical_pool_key -> {
 #   "raw_tags": str, "page": int, "posts": list[dict], "seen_post_ids": set[int],
@@ -1157,7 +1377,7 @@ MAX_SEEN_IDS = 1800
 #   "consecutive_empty_pages": int, "next_allowed_fetch_time": float,
 #   "last_status": {"status": str, "page": int, "count": int}
 # }
-TAG_POOLS = {}
+TAG_POOLS = OrderedDict()
 
 # Per-Screen Runtime State: screen_id -> {
 #   "epoch": int, "wallpaper_paused": bool, "nav_seq": int, "nav_action": str,
@@ -1189,6 +1409,12 @@ SETTINGS_DIALOG_INSTANCE = None
 GLOSSARY_DIALOG_INSTANCE = None
 RESOURCE_GRAPH_DIALOG_INSTANCE = None
 
+# Runtime-only session memory for Application Settings tab and selected screen:
+# Starts as None when the application first launches, and remembers the last tab/display
+# whenever Application Settings is closed and reopened while the application is running.
+_RUNTIME_LAST_SETTINGS_TAB = None
+_RUNTIME_LAST_SELECTED_SCREEN_ID = None
+
 CONNECTED_SCREENS = enumerate_connected_monitors()
 WEBVIEW_WINDOWS = {}       # screen_id -> webview.Window
 DESKTOP_HWNDS = {}         # screen_id -> int HWND
@@ -1199,7 +1425,7 @@ _PENDING_SYNC_GEOMETRY = False
 _PROP_PUSH_WORKER_ACTIVE = False
 _LAST_SCREEN_ENABLED_STATE = {}
 _JS_EVAL_LOCK = threading.Lock()
-_JS_EVAL_QUEUE = deque(maxlen=16)
+_JS_EVAL_QUEUE = deque(maxlen=128)
 _JS_EVAL_WORKER_ACTIVE = False
 
 
@@ -1266,11 +1492,14 @@ def _query_cloudflare_doh_direct(hostname: str) -> str:
             )
             tls_sock.sendall(req_lines.encode("utf-8"))
             response_chunks = []
-            while True:
+            total_read = 0
+            max_doh_bytes = 65536
+            while total_read < max_doh_bytes:
                 data = tls_sock.recv(16384)
                 if not data:
                     break
                 response_chunks.append(data)
+                total_read += len(data)
             raw_response = b"".join(response_chunks)
             if b"\r\n\r\n" in raw_response:
                 header_bytes, body_bytes = raw_response.split(b"\r\n\r\n", 1)
@@ -1287,10 +1516,15 @@ def _query_cloudflare_doh_direct(hostname: str) -> str:
                             chunk_len_hex = body_bytes[idx:crlf_pos].split(b";", 1)[0].strip()
                             if not chunk_len_hex:
                                 break
-                            chunk_len = int(chunk_len_hex, 16)
-                            if chunk_len == 0:
+                            try:
+                                chunk_len = int(chunk_len_hex, 16)
+                            except ValueError:
+                                break
+                            if chunk_len <= 0 or chunk_len > max_doh_bytes:
                                 break
                             start_data = crlf_pos + 2
+                            if start_data + chunk_len > len(body_bytes):
+                                break
                             decoded_body.extend(body_bytes[start_data:start_data + chunk_len])
                             idx = start_data + chunk_len + 2
                         body_bytes = bytes(decoded_body)
@@ -1298,7 +1532,9 @@ def _query_cloudflare_doh_direct(hostname: str) -> str:
                     payload = json.loads(body_bytes.decode("utf-8", errors="replace"))
                     for ans in payload.get("Answer", []):
                         if ans.get("type") == 1 and ans.get("data"):
-                            return str(ans["data"]).strip()
+                            candidate_ip = str(ans["data"]).strip()
+                            if is_public_unicast_ipv4(candidate_ip):
+                                return candidate_ip
         except Exception:
             pass
         finally:
@@ -1319,6 +1555,7 @@ def resolve_hostname_doh(hostname: str) -> str:
     """
     Resolves Danbooru and CDN hostnames via Cloudflare DNS-over-HTTPS (DoH)
     (https://cloudflare-dns.com/dns-query) to bypass ISP plain-text DNS blocks/poisoning.
+    Strictly validates that resolved IPs are globally routable public IPv4 addresses.
     """
     if not hostname:
         return ""
@@ -1326,22 +1563,34 @@ def resolve_hostname_doh(hostname: str) -> str:
     now = time.time()
     with DOH_LOCK:
         cached = DOH_CACHE.get(hostname)
-        if cached and cached[1] > now:
+        if cached and cached[1] > now and is_public_unicast_ipv4(cached[0]):
+            DOH_CACHE.move_to_end(hostname)
             return cached[0]
+        elif cached:
+            DOH_CACHE.pop(hostname, None)
 
     resolved_ip = _query_cloudflare_doh_direct(hostname)
     if not resolved_ip:
         try:
-            resolved_ip = socket.gethostbyname(hostname)
+            fallback_ip = socket.gethostbyname(hostname)
+            if is_public_unicast_ipv4(fallback_ip):
+                resolved_ip = fallback_ip
         except Exception:
             resolved_ip = ""
 
-    if resolved_ip:
+    if resolved_ip and is_public_unicast_ipv4(resolved_ip):
         with DOH_LOCK:
+            expired_hosts = [h for h, (_, exp) in DOH_CACHE.items() if exp <= now]
+            for h in expired_hosts:
+                DOH_CACHE.pop(h, None)
             DOH_CACHE[hostname] = (resolved_ip, now + DOH_CACHE_TTL)
+            DOH_CACHE.move_to_end(hostname)
+            while len(DOH_CACHE) > MAX_DOH_CACHE_ENTRIES:
+                DOH_CACHE.popitem(last=False)
         log_event("doh", f"Resolved {hostname} -> {resolved_ip} via Cloudflare DoH")
+        return resolved_ip
 
-    return resolved_ip
+    return ""
 
 
 def build_curl_resolve_list(hostnames=None) -> list:
@@ -1403,7 +1652,7 @@ class DoHSNIHTTPSHandler(urllib.request.HTTPSHandler):
 
 
 class SafeDoHRedirectHandler(urllib.request.HTTPRedirectHandler):
-    """Validates redirect targets against ALLOWED_MEDIA_HOSTS while preserving DoH+SNI routing."""
+    """Validates redirect targets against ALLOWED_MEDIA_HOSTS and FORBIDDEN_URL_TOKENS while preserving DoH+SNI routing."""
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         parsed = urllib.parse.urlparse(newurl)
         host = (parsed.hostname or "").lower()
@@ -1411,6 +1660,12 @@ class SafeDoHRedirectHandler(urllib.request.HTTPRedirectHandler):
             raise urllib.error.HTTPError(
                 newurl, 403, f"Redirect to unauthorized host blocked: {host}", headers, fp
             )
+        lower_path_and_query = f"{parsed.path or ''}?{parsed.query or ''}".lower()
+        for bad_tok in FORBIDDEN_URL_TOKENS:
+            if bad_tok in lower_path_and_query:
+                raise urllib.error.HTTPError(
+                    newurl, 403, f"Redirect contains forbidden token ({bad_tok})", headers, fp
+                )
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
@@ -1477,18 +1732,13 @@ class StdlibResponseAdapter:
 
 def iter_response_chunks(resp, chunk_size: int = 65536):
     """
-    Safely yields binary chunks from either a curl_cffi Response or a StdlibResponseAdapter.
+    Safely yields binary chunks from either a curl_cffi Response or a StdlibResponseAdapter
+    without buffering the entire media stream into RAM at once.
     """
     if isinstance(resp, StdlibResponseAdapter):
         for chunk in resp.iter_content(chunk_size=chunk_size):
             if chunk:
                 yield chunk
-        return
-
-    content = getattr(resp, "content", None)
-    if content:
-        for i in range(0, len(content), chunk_size):
-            yield content[i:i + chunk_size]
         return
 
     if hasattr(resp, "iter_content"):
@@ -1500,6 +1750,12 @@ def iter_response_chunks(resp, chunk_size: int = 65536):
             for chunk in resp.iter_content():
                 if chunk:
                     yield chunk
+        return
+
+    content = getattr(resp, "content", None)
+    if content:
+        for i in range(0, len(content), chunk_size):
+            yield content[i:i + chunk_size]
 
 
 class StdlibDoHSession:
@@ -1515,7 +1771,7 @@ class StdlibDoHSession:
             SafeDoHRedirectHandler(),
         )
 
-    def get(self, url: str, params: dict = None, headers: dict = None, stream: bool = False, timeout: float = 15.0, **kwargs):
+    def get(self, url: str, params: dict = None, headers: dict = None, stream: bool = False, timeout: float = 15.0, auth: tuple = None, **kwargs):
         if params:
             qs = urllib.parse.urlencode(params)
             sep = "&" if "?" in url else "?"
@@ -1525,8 +1781,10 @@ class StdlibDoHSession:
         if headers:
             merged_headers.update(headers)
 
-        if self.auth and isinstance(self.auth, tuple) and len(self.auth) == 2:
-            user, key = self.auth
+        effective_auth = auth if auth is not None else self.auth
+        parsed_host = (urllib.parse.urlparse(url).hostname or "").lower()
+        if effective_auth and parsed_host == "danbooru.donmai.us" and isinstance(effective_auth, tuple) and len(effective_auth) == 2:
+            user, key = effective_auth
             if user and key:
                 token = base64.b64encode(f"{user}:{key}".encode("utf-8")).decode("ascii")
                 merged_headers["Authorization"] = f"Basic {token}"
@@ -1605,7 +1863,6 @@ class HybridDoHSession:
                 c_sess = curl_requests.Session(**base_kwargs)
 
             c_sess.headers.update(self.headers)
-            c_sess.auth = self.auth
             self._curl_session = c_sess
         except Exception as e:
             log_event("auth", f"curl_cffi session init failed ({e}); falling back to stdlib DoH+SNI transport.")
@@ -1650,21 +1907,24 @@ class HybridDoHSession:
             if parsed.scheme != "https" or target_host not in ALLOWED_MEDIA_HOSTS:
                 raise PermissionError(f"Blocked outbound request to unauthorized host: {target_host}")
 
-            self._stdlib_session.headers.update(self.headers)
-            self._stdlib_session.auth = self.auth
+            # Only send Danbooru Basic Auth to the primary API host, never to public CDN nodes
+            req_auth = self.auth if target_host == "danbooru.donmai.us" else None
+            merged_req_headers = dict(self.headers)
+            if headers:
+                merged_req_headers.update(headers)
 
             resp = None
             if self._curl_session is not None and CURL_CFFI_AVAILABLE:
                 try:
-                    self._curl_session.headers.update(self.headers)
-                    self._curl_session.auth = self.auth
                     self._apply_doh_to_curl_session(target_host)
 
                     # Disable unchecked automatic redirects; validate each hop manually
                     resp = self._curl_session.get(
                         current_url,
                         params=current_params,
-                        headers=headers,
+                        headers=merged_req_headers,
+                        auth=req_auth,
+                        stream=stream,
                         timeout=timeout,
                         allow_redirects=False,
                     )
@@ -1684,7 +1944,8 @@ class HybridDoHSession:
                 resp = self._stdlib_session.get(
                     current_url,
                     params=current_params,
-                    headers=headers,
+                    headers=merged_req_headers,
+                    auth=req_auth,
                     stream=stream,
                     timeout=timeout,
                     allow_redirects=allow_redirects,
@@ -1706,6 +1967,11 @@ class HybridDoHSession:
                 if next_parsed.scheme != "https" or next_host not in ALLOWED_MEDIA_HOSTS:
                     log_event("security", f"Blocked redirect to unauthorized host: {next_url}")
                     raise PermissionError(f"Redirect to unauthorized host blocked: {next_host}")
+                lower_path_and_query = f"{next_parsed.path or ''}?{next_parsed.query or ''}".lower()
+                for bad_tok in FORBIDDEN_URL_TOKENS:
+                    if bad_tok in lower_path_and_query:
+                        log_event("security", f"Blocked redirect containing forbidden token ({bad_tok}): {next_url}")
+                        raise PermissionError(f"Redirect contains forbidden token ({bad_tok})")
                 current_url = next_url
                 current_params = None
                 continue
@@ -1842,46 +2108,160 @@ def _normalize_masonry_layout_value(val: str) -> str:
     return "mondrian"
 
 
+def _normalize_masonry_edge_fill_value(val: str) -> str:
+    v = str(val or "blur").strip().lower()
+    if v in ("black", "none", "off", "solid"):
+        return "black"
+    return "blur"
+
+
+def _normalize_vsync_value(val) -> bool:
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, (int, float)):
+        return bool(val)
+    v = str(val if val is not None else "true").strip().lower()
+    if v in ("false", "0", "off", "no", "disabled"):
+        return False
+    return True
+
+
+PROJECT_CONFIG_LOCK = threading.RLock()
+_CACHED_PROJECT_DATA = None
+
+
+def _coerce_and_clamp_props_dict(props_dict: dict, def_props: dict):
+    """Validates numeric slider ranges, boolean flags, and enforces the minsize <= maxsize invariant."""
+    for k, schema in def_props.items():
+        if k not in props_dict or not isinstance(props_dict[k], dict):
+            continue
+        val = props_dict[k].get("value", schema["value"])
+        if schema.get("type") == "slider":
+            try:
+                num = float(val)
+                num = max(float(schema["min"]), min(float(schema["max"]), num))
+                prec = int(schema.get("precision", 0) or 0)
+                is_float_slider = prec > 0 or isinstance(schema.get("step"), float) or isinstance(schema["value"], float)
+                if is_float_slider:
+                    rounded = round(num, max(1, prec))
+                    props_dict[k]["value"] = int(rounded) if rounded.is_integer() and isinstance(schema["value"], int) else rounded
+                else:
+                    props_dict[k]["value"] = int(round(num))
+            except (ValueError, TypeError):
+                props_dict[k]["value"] = schema["value"]
+        elif schema.get("type") == "bool":
+            props_dict[k]["value"] = _normalize_vsync_value(val)
+    min_s = props_dict.get("minsize", {}).get("value", 220)
+    max_s = props_dict.get("maxsize", {}).get("value", 440)
+    if isinstance(min_s, (int, float)) and isinstance(max_s, (int, float)) and min_s > max_s:
+        props_dict["minsize"]["value"], props_dict["maxsize"]["value"] = max_s, min_s
+
+
+def _normalize_project_dict_in_place(data: dict) -> dict:
+    def_props = get_default_properties_dict()
+    general_props = data.setdefault("general", {}).setdefault("properties", {})
+    for k, v in def_props.items():
+        if k not in general_props or not isinstance(general_props[k], dict):
+            general_props[k] = json.loads(json.dumps(v))
+        else:
+            saved_val = general_props[k].get("value", v["value"])
+            if k == "displaymode":
+                saved_val = _normalize_display_mode_value(saved_val)
+            elif k == "masonrylayout":
+                saved_val = _normalize_masonry_layout_value(saved_val)
+            elif k == "masonryedgefill":
+                saved_val = _normalize_masonry_edge_fill_value(saved_val)
+            elif k in ("vsync", "pausefullscreen"):
+                saved_val = _normalize_vsync_value(saved_val)
+            merged_meta = json.loads(json.dumps(v))
+            merged_meta["value"] = saved_val
+            general_props[k] = merged_meta
+    _coerce_and_clamp_props_dict(general_props, def_props)
+
+    screens_dict = data.setdefault("screens", {})
+    for s_id, s_cfg in list(screens_dict.items()):
+        if not isinstance(s_cfg, dict):
+            screens_dict[s_id] = {
+                "enabled": (s_id == "screen_1"),
+                "properties": json.loads(json.dumps(general_props)),
+            }
+            continue
+        s_cfg["enabled"] = bool(s_cfg.get("enabled", s_id == "screen_1"))
+        s_props = s_cfg.get("properties")
+        if not isinstance(s_props, dict):
+            s_props = {}
+        for k, v in def_props.items():
+            base_default = general_props.get(k, v)
+            if k not in s_props or not isinstance(s_props[k], dict):
+                s_props[k] = json.loads(json.dumps(base_default))
+            else:
+                saved_val = s_props[k].get("value", base_default["value"])
+                if k == "displaymode":
+                    saved_val = _normalize_display_mode_value(saved_val)
+                elif k == "masonrylayout":
+                    saved_val = _normalize_masonry_layout_value(saved_val)
+                elif k == "masonryedgefill":
+                    saved_val = _normalize_masonry_edge_fill_value(saved_val)
+                elif k in ("vsync", "pausefullscreen"):
+                    saved_val = _normalize_vsync_value(saved_val)
+                merged_meta = json.loads(json.dumps(v))
+                merged_meta["value"] = saved_val
+                s_props[k] = merged_meta
+        _coerce_and_clamp_props_dict(s_props, def_props)
+        s_cfg["properties"] = s_props
+    return data
+
+
 def load_project_json():
-    if os.path.exists(PROJECT_JSON_FILE):
-        try:
-            with open(PROJECT_JSON_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            if isinstance(data, dict):
-                general_props = data.setdefault("general", {}).setdefault("properties", {})
-                for k, v in get_default_properties_dict().items():
-                    if k not in general_props or not isinstance(general_props[k], dict):
-                        general_props[k] = json.loads(json.dumps(v))
-                    else:
-                        saved_val = general_props[k].get("value", v["value"])
-                        if k == "displaymode":
-                            saved_val = _normalize_display_mode_value(saved_val)
-                        elif k == "masonrylayout":
-                            saved_val = _normalize_masonry_layout_value(saved_val)
-                        merged_meta = json.loads(json.dumps(v))
-                        merged_meta["value"] = saved_val
-                        general_props[k] = merged_meta
-                screens_dict = data.setdefault("screens", {})
-                for s_cfg in screens_dict.values():
-                    if isinstance(s_cfg, dict) and isinstance(s_cfg.get("properties"), dict):
-                        dm = s_cfg["properties"].get("displaymode")
-                        if isinstance(dm, dict) and "value" in dm:
-                            dm["value"] = _normalize_display_mode_value(dm["value"])
-                        ml = s_cfg["properties"].get("masonrylayout")
-                        if isinstance(ml, dict) and "value" in ml:
-                            ml["value"] = _normalize_masonry_layout_value(ml["value"])
-                return data
-        except Exception as e:
-            log_event("config", f"Failed to read project.json: {e}")
-    return json.loads(json.dumps(DEFAULT_PROJECT_SCHEMA))
+    global _CACHED_PROJECT_DATA
+    with PROJECT_CONFIG_LOCK:
+        if _CACHED_PROJECT_DATA is not None:
+            return json.loads(json.dumps(_CACHED_PROJECT_DATA))
+        if os.path.exists(PROJECT_JSON_FILE):
+            try:
+                with open(PROJECT_JSON_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, dict):
+                    _normalize_project_dict_in_place(data)
+                    _CACHED_PROJECT_DATA = json.loads(json.dumps(data))
+                    return data
+            except Exception as e:
+                log_event("config", f"Failed to read project.json: {e}")
+        default_copy = json.loads(json.dumps(DEFAULT_PROJECT_SCHEMA))
+        _CACHED_PROJECT_DATA = json.loads(json.dumps(default_copy))
+        return default_copy
 
 
 def store_project_json(project_data):
-    try:
-        with open(PROJECT_JSON_FILE, "w", encoding="utf-8") as f:
-            json.dump(project_data, f, indent=2)
-    except Exception as e:
-        log_event("config", f"Failed to save project.json: {e}")
+    global _CACHED_PROJECT_DATA
+    with PROJECT_CONFIG_LOCK:
+        try:
+            if isinstance(project_data, dict):
+                _normalize_project_dict_in_place(project_data)
+                _CACHED_PROJECT_DATA = json.loads(json.dumps(project_data))
+            tmp_file = PROJECT_JSON_FILE + ".tmp"
+            with open(tmp_file, "w", encoding="utf-8") as f:
+                json.dump(project_data, f, indent=2)
+            os.replace(tmp_file, PROJECT_JSON_FILE)
+        except Exception as e:
+            try:
+                with open(PROJECT_JSON_FILE, "w", encoding="utf-8") as f:
+                    json.dump(project_data, f, indent=2)
+            except Exception as inner_e:
+                log_event("config", f"Failed to save project.json: {e} / {inner_e}")
+
+
+def is_screen_enabled(screen_id="screen_1") -> bool:
+    """Fast-path read of a screen's enabled boolean without deep-copying the full project schema."""
+    s_id = str(screen_id or "screen_1")
+    with PROJECT_CONFIG_LOCK:
+        if _CACHED_PROJECT_DATA is not None:
+            screens_dict = _CACHED_PROJECT_DATA.get("screens", {})
+            if s_id in screens_dict and isinstance(screens_dict[s_id], dict):
+                return bool(screens_dict[s_id].get("enabled", s_id == "screen_1"))
+            return s_id == "screen_1"
+    sc_cfg = get_screen_config(s_id)
+    return bool(sc_cfg.get("enabled", s_id == "screen_1"))
 
 
 def get_screen_config(screen_id="screen_1"):
@@ -1900,6 +2280,8 @@ def get_screen_config(screen_id="screen_1"):
                     val = _normalize_display_mode_value(v["value"])
                 elif k == "masonrylayout":
                     val = _normalize_masonry_layout_value(v["value"])
+                elif k == "masonryedgefill":
+                    val = _normalize_masonry_edge_fill_value(v["value"])
                 else:
                     val = v["value"]
                 merged_props[k]["value"] = val
@@ -1932,14 +2314,52 @@ def get_danbooru_tag_color(category_id: int, theme: str = None) -> str:
     return pal.get(int(category_id or 0), pal[0])
 
 
-def lookup_cached_tag_category(raw_token: str, default=None):
-    """Looks up a tag token's Danbooru category (stripping leading '-' or '~' operators)."""
+def cache_tag_category_locked(tag_name: str, category_id: int):
+    """Thread-safely caches a tag's Danbooru category with bounded LRU eviction (requires DATA_LOCK)."""
+    clean = str(tag_name or "").strip().lstrip("-~").lower()
+    if not clean:
+        return
+    cat = int(category_id or 0)
+    if cat not in (0, 1, 3, 4, 5):
+        cat = 0
+    TAG_CATEGORY_CACHE[clean] = cat
+    TAG_CATEGORY_CACHE.move_to_end(clean)
+    while len(TAG_CATEGORY_CACHE) > MAX_TAG_CATEGORY_CACHE:
+        oldest_key, _ = TAG_CATEGORY_CACHE.popitem(last=False)
+        if oldest_key in SEEDED_TAG_CATEGORIES:
+            TAG_CATEGORY_CACHE[oldest_key] = SEEDED_TAG_CATEGORIES[oldest_key]
+
+
+def cache_post_tags_locked(post_id: int, tags_list: list):
+    """Thread-safely caches categorized post tags with bounded LRU eviction (requires DATA_LOCK)."""
+    pid = int(post_id or 0)
+    if pid <= 0 or not tags_list:
+        return
+    POST_TAGS_CACHE[pid] = list(tags_list)
+    POST_TAGS_CACHE.move_to_end(pid)
+    while len(POST_TAGS_CACHE) > MAX_POST_TAGS_CACHE:
+        POST_TAGS_CACHE.popitem(last=False)
+
+
+def _lookup_cached_tag_category_unlocked(raw_token: str, default=None):
+    """Internal helper for callers that already hold DATA_LOCK."""
     clean = str(raw_token or "").strip().lstrip("-~").lower()
     if not clean:
         return 0
     if clean.startswith(("rating:", "order:", "ordfav:", "score:", "width:", "height:", "mpixels:", "filesize:", "filetype:", "id:", "date:", "pool:", "parent:", "child:", "source:", "status:")):
         return 5
     return TAG_CATEGORY_CACHE.get(clean, default)
+
+
+def lookup_cached_tag_category(raw_token: str, default=None):
+    """Thread-safely looks up a tag token's Danbooru category (stripping leading '-' or '~' operators)."""
+    clean = str(raw_token or "").strip().lstrip("-~").lower()
+    if not clean:
+        return 0
+    if clean.startswith(("rating:", "order:", "ordfav:", "score:", "width:", "height:", "mpixels:", "filesize:", "filetype:", "id:", "date:", "pool:", "parent:", "child:", "source:", "status:")):
+        return 5
+    with DATA_LOCK:
+        return TAG_CATEGORY_CACHE.get(clean, default)
 
 
 def get_screen_runtime_state(screen_id: str) -> dict:
@@ -1949,6 +2369,7 @@ def get_screen_runtime_state(screen_id: str) -> dict:
         st = {
             "epoch": 1,
             "wallpaper_paused": False,
+            "fullscreen_paused": False,
             "nav_seq": 0,
             "nav_action": "",
             "last_nav_time": 0.0,
@@ -1961,12 +2382,30 @@ def get_screen_runtime_state(screen_id: str) -> dict:
     return st
 
 
+def is_screen_effectively_paused(screen_id: str) -> bool:
+    """Returns True if the application is globally paused or the specified screen is paused (manually or via fullscreen app)."""
+    if APP_PAUSED:
+        return True
+    with DATA_LOCK:
+        st = get_screen_runtime_state(screen_id)
+        return bool(st.get("wallpaper_paused", False) or st.get("fullscreen_paused", False))
+
+
 def get_or_create_tag_pool_locked(raw_tags: str) -> tuple[str, dict]:
-    """Returns (pool_key, pool_dict) for the normalized tag query (must be called with DATA_LOCK held)."""
+    """Returns (pool_key, pool_dict) for the normalized tag query with bounded pool eviction (must be called with DATA_LOCK held)."""
     norm_tags = normalize_tag_query(raw_tags)
     pkey = canonical_pool_key(norm_tags)
     pool = TAG_POOLS.get(pkey)
     if pool is None:
+        while len(TAG_POOLS) >= MAX_TAG_POOLS:
+            evicted = False
+            for old_key, old_pool in list(TAG_POOLS.items()):
+                if not old_pool.get("is_fetching", False):
+                    TAG_POOLS.pop(old_key, None)
+                    evicted = True
+                    break
+            if not evicted:
+                break
         pool = {
             "raw_tags": norm_tags,
             "page": 1,
@@ -1982,6 +2421,7 @@ def get_or_create_tag_pool_locked(raw_tags: str) -> tuple[str, dict]:
         TAG_POOLS[pkey] = pool
     else:
         pool["raw_tags"] = norm_tags
+        TAG_POOLS.move_to_end(pkey)
     return pkey, pool
 
 
@@ -2014,11 +2454,13 @@ def set_screen_tags_in_project_json(screen_id: str, new_tags: str):
 
 
 def is_any_enabled_screen_using_pool(pool_key: str) -> bool:
-    """Returns True if at least one enabled screen is currently configured with tags matching pool_key."""
+    """Returns True if at least one enabled and unpaused screen is currently configured with tags matching pool_key."""
     for s in CONNECTED_SCREENS:
         sid = s["id"]
         sc_cfg = get_screen_config(sid)
         if not sc_cfg.get("enabled", False):
+            continue
+        if is_screen_effectively_paused(sid):
             continue
         with DATA_LOCK:
             st = get_screen_runtime_state(sid)
@@ -2058,7 +2500,11 @@ def _async_evaluate_js(win, js_code: str, log_cat: str = None, log_msg: str = No
     if not win:
         return
     with _JS_EVAL_LOCK:
-        _JS_EVAL_QUEUE.append((win, js_code, log_cat, log_msg))
+        # Coalesce consecutive identical JS evaluations for the same window to preserve queue capacity
+        if _JS_EVAL_QUEUE and _JS_EVAL_QUEUE[-1][0] is win and _JS_EVAL_QUEUE[-1][1] == js_code:
+            _JS_EVAL_QUEUE[-1] = (win, js_code, log_cat, log_msg)
+        else:
+            _JS_EVAL_QUEUE.append((win, js_code, log_cat, log_msg))
         if not _JS_EVAL_WORKER_ACTIVE:
             _JS_EVAL_WORKER_ACTIVE = True
             threading.Thread(target=_js_eval_worker, daemon=True).start()
@@ -2137,7 +2583,7 @@ def push_properties_to_webview(target_screen_id=None, sync_geometry=False):
 
 
 def push_pause_states_to_webviews(target_screen_id=None):
-    """Immediately synchronizes master APP_PAUSED and per-screen wallpaper_paused states to target or all screens."""
+    """Immediately synchronizes master APP_PAUSED and effective per-screen pause state (manual or fullscreen) to target or all screens."""
     app_p = "true" if APP_PAUSED else "false"
     target_items = (
         [(target_screen_id, WEBVIEW_WINDOWS.get(target_screen_id))]
@@ -2149,7 +2595,7 @@ def push_pause_states_to_webviews(target_screen_id=None):
             continue
         with DATA_LOCK:
             st = get_screen_runtime_state(sid)
-            wp_paused = st["wallpaper_paused"]
+            wp_paused = bool(st.get("wallpaper_paused", False) or st.get("fullscreen_paused", False))
         wp_p = "true" if wp_paused else "false"
         js_code = f"if (window.applyPauseStates) {{ window.applyPauseStates({app_p}, {wp_p}); }}"
         _async_evaluate_js(win, js_code)
@@ -2280,11 +2726,12 @@ def extract_and_cache_post_tags_locked(post_dict: dict) -> list[tuple[str, int]]
                 if not t_clean:
                     continue
                 t_lower = t_clean.lower()
-                TAG_CATEGORY_CACHE[t_lower] = cat_id
+                cache_tag_category_locked(t_lower, cat_id)
                 if t_lower not in seen_tags:
                     seen_tags.add(t_lower)
                     categorized.append((t_clean, cat_id))
 
+    unknown_fallback_tags = []
     if not categorized:
         fallback_str = post_dict.get("tag_string") or ""
         if isinstance(fallback_str, str) and fallback_str.strip():
@@ -2293,18 +2740,23 @@ def extract_and_cache_post_tags_locked(post_dict: dict) -> list[tuple[str, int]]
                 if not t_clean:
                     continue
                 t_lower = t_clean.lower()
-                cat_id = TAG_CATEGORY_CACHE.get(t_lower, 0)
+                cat_id = TAG_CATEGORY_CACHE.get(t_lower, None)
+                if cat_id is None:
+                    cat_id = 0
+                    if len(unknown_fallback_tags) < 60:
+                        unknown_fallback_tags.append(t_lower)
                 if t_lower not in seen_tags:
                     seen_tags.add(t_lower)
                     categorized.append((t_clean, cat_id))
 
     if pid > 0 and categorized:
-        if pid not in POST_TAGS_CACHE:
-            POST_TAGS_ORDER.append(pid)
-            if len(POST_TAGS_ORDER) >= 2500:
-                oldest_pid = POST_TAGS_ORDER.popleft()
-                POST_TAGS_CACHE.pop(oldest_pid, None)
-        POST_TAGS_CACHE[pid] = categorized
+        cache_post_tags_locked(pid, categorized)
+
+    if unknown_fallback_tags:
+        try:
+            TAG_LOOKUP_QUEUE.put_nowait(unknown_fallback_tags)
+        except Exception:
+            pass
 
     return categorized
 
@@ -2428,7 +2880,7 @@ def fetch_tag_suggestions(query_prefix):
                         cat = int(item.get("category", 0) or 0)
                         if cat not in DANBOORU_TAG_COLORS["light"]:
                             cat = 0
-                        TAG_CATEGORY_CACHE[name.lower()] = cat
+                        cache_tag_category_locked(name, cat)
                         results.append((name, int(item.get("post_count", 0) or 0), cat))
                 return results[:5]
     except Exception as e:
@@ -2480,7 +2932,7 @@ def resolve_unknown_tag_categories(tag_names: list[str]) -> bool:
                             cat = int(item.get("category", 0) or 0)
                             if cat not in DANBOORU_TAG_COLORS["light"]:
                                 cat = 0
-                            TAG_CATEGORY_CACHE[name] = cat
+                            cache_tag_category_locked(name, cat)
                             updated_any = True
     except Exception:
         pass
@@ -2674,11 +3126,13 @@ def fill_tag_pool(raw_tags: str, wait_if_busy: bool = False, force_reset: bool =
 
 
 def ensure_screen_tag_pool_populated_async(screen_id: str, force_reset: bool = False):
-    """Spawns a background fetch for screen_id's tag pool only if screen_id is enabled and its pool is empty (or force_reset is True)."""
+    """Spawns a background fetch for screen_id's tag pool only if screen_id is enabled, unpaused (or force_reset), and its pool is empty."""
     if APP_PAUSED:
         return
     sc_cfg = get_screen_config(screen_id)
     if not sc_cfg.get("enabled", False):
+        return
+    if not force_reset and is_screen_effectively_paused(screen_id):
         return
     tags = sc_cfg.get("properties", {}).get("searchtags", {}).get("value", DEFAULT_TAGS)
     with DATA_LOCK:
@@ -2691,12 +3145,12 @@ def ensure_screen_tag_pool_populated_async(screen_id: str, force_reset: bool = F
             should_fetch = not pool["is_fetching"]
         else:
             should_fetch = (len(pool["posts"]) == 0 and not pool["is_fetching"])
-    if should_fetch:
+    if should_fetch and not is_screen_effectively_paused(screen_id):
         threading.Thread(target=fill_tag_pool, args=(tags, False, force_reset), daemon=True).start()
 
 
 def ensure_all_enabled_screen_pools_populated(force_reset: bool = False):
-    """Starts background fetches for unique tag pools used by enabled screens (deduplicating shared tags)."""
+    """Starts background fetches for unique tag pools used by enabled, unpaused screens (deduplicating shared tags)."""
     if APP_PAUSED:
         return
     seen_pools = set()
@@ -2704,6 +3158,8 @@ def ensure_all_enabled_screen_pools_populated(force_reset: bool = False):
         sid = s["id"]
         sc_cfg = get_screen_config(sid)
         if not sc_cfg.get("enabled", False):
+            continue
+        if is_screen_effectively_paused(sid):
             continue
         tags = sc_cfg.get("properties", {}).get("searchtags", {}).get("value", DEFAULT_TAGS)
         pkey = canonical_pool_key(tags)
@@ -2783,11 +3239,12 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 self.send_header("Referrer-Policy", "no-referrer")
                 self.send_header("X-Frame-Options", "DENY")
                 self.send_header("X-Content-Type-Options", "nosniff")
+                self.send_header("Cross-Origin-Resource-Policy", "same-origin")
                 self.send_header(
                     "Content-Security-Policy",
                     "default-src 'self'; img-src 'self' blob: data:; media-src 'self' blob:; "
                     "script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; "
-                    "connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none';"
+                    "connect-src 'self'; object-src 'none'; frame-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none';"
                 )
                 self.send_header("Connection", "close")
                 self.end_headers()
@@ -2819,13 +3276,13 @@ class ProxyHandler(BaseHTTPRequestHandler):
                         if not clean_t or clean_t in seen_t:
                             continue
                         seen_t.add(clean_t)
-                        cat = lookup_cached_tag_category(clean_t, default=None)
+                        cat = _lookup_cached_tag_category_unlocked(clean_t, default=None)
                         if cat is None:
                             cat = 0
                             unknown_for_lookup.append(clean_t)
                         tags_list.append((clean_t, cat))
                     if post_id > 0 and tags_list:
-                        POST_TAGS_CACHE[post_id] = list(tags_list)
+                        cache_post_tags_locked(post_id, tags_list)
 
                 if post_id > 0 or tags_list:
                     st["last_displayed_post_id"] = post_id
@@ -2867,7 +3324,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 sc_cfg = get_screen_config(screen_id)
                 with DATA_LOCK:
                     st = get_screen_runtime_state(screen_id)
-                    wp_paused = st["wallpaper_paused"]
+                    wp_paused = bool(st.get("wallpaper_paused", False) or st.get("fullscreen_paused", False))
                 payload = {
                     "enabled": sc_cfg["enabled"],
                     "properties": sc_cfg["properties"],
@@ -2892,20 +3349,20 @@ class ProxyHandler(BaseHTTPRequestHandler):
             should_log_ping = False
             poll_count_snapshot = 0
             elapsed_snapshot = 0
-            sc_cfg = get_screen_config(screen_id)
-            enabled_flag = bool(sc_cfg.get("enabled", False))
+            enabled_flag = is_screen_enabled(screen_id)
 
             with DATA_LOCK:
                 if LAST_EPOCH_LOG_TIME == 0.0:
                     LAST_EPOCH_LOG_TIME = now
 
                 st = get_screen_runtime_state(screen_id)
+                effective_wp_paused = bool(st.get("wallpaper_paused", False) or st.get("fullscreen_paused", False))
                 EPOCH_POLL_COUNT += 1
                 res_body = json.dumps({
                     "epoch": st["epoch"],
                     "enabled": enabled_flag,
                     "app_paused": APP_PAUSED,
-                    "wallpaper_paused": st["wallpaper_paused"],
+                    "wallpaper_paused": effective_wp_paused,
                     "nav_seq": st["nav_seq"],
                     "nav_action": st["nav_action"],
                     "prop_seq": PROP_SEQ,
@@ -2936,7 +3393,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
         if path_only == "/api":
             sc_cfg = get_screen_config(screen_id)
-            if APP_PAUSED or not sc_cfg.get("enabled", False):
+            if is_screen_effectively_paused(screen_id) or not sc_cfg.get("enabled", False):
                 try:
                     empty_body = b"[]"
                     self.send_response(200)
@@ -3105,11 +3562,23 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 "Referer": "https://danbooru.donmai.us/",
                 "Accept": "image/avif,image/webp,image/apng,image/*,video/mp4,video/*;q=0.9,*/*;q=0.8",
             }
-            client_range = None
+            forwarded_range = None
+            range_start = 0
             if is_mp4:
-                client_range = self.headers.get("Range")
-                if client_range and re.match(r"^bytes=\d*-\d*$", client_range.strip()):
-                    req_headers["Range"] = client_range.strip()
+                client_range = (self.headers.get("Range") or "").strip()
+                m_range = re.match(r"^bytes=(\d+)-(\d*)$", client_range)
+                if m_range:
+                    range_start = int(m_range.group(1))
+                    range_end_str = m_range.group(2)
+                    if range_start == 0:
+                        if range_end_str and int(range_end_str) < 63:
+                            forwarded_range = "bytes=0-65535"
+                        else:
+                            forwarded_range = client_range
+                        req_headers["Range"] = forwarded_range
+                    elif is_mp4_url_verified(target_url):
+                        forwarded_range = client_range
+                        req_headers["Range"] = forwarded_range
 
             headers_sent = False
             resp = None
@@ -3133,6 +3602,23 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
                 content_len_str = resp.headers.get("Content-Length") or resp.headers.get("content-length")
                 content_range = resp.headers.get("Content-Range") or resp.headers.get("content-range")
+
+                if content_range:
+                    m_total = re.search(r"/(\d+)$", content_range.strip())
+                    if m_total:
+                        try:
+                            total_res_bytes = int(m_total.group(1))
+                            if total_res_bytes > max_allowed_bytes:
+                                log_event(
+                                    "proxy",
+                                    f"Filtered oversized Content-Range resource ({total_res_bytes:,} bytes > {max_allowed_bytes:,}): {target_url}"
+                                )
+                                self.send_response(413)
+                                self.send_header("Connection", "close")
+                                self.end_headers()
+                                return
+                        except ValueError:
+                            pass
 
                 if content_len_str:
                     try:
@@ -3163,8 +3649,15 @@ class ProxyHandler(BaseHTTPRequestHandler):
                     self.end_headers()
                     return
 
-                is_range_cont = bool(status_code == 206 and client_range and not client_range.startswith("bytes=0-"))
-                magic_ok, verified_mime, magic_reason = verify_media_magic_bytes(first_chunk, is_range_continuation=is_range_cont)
+                is_range_cont = bool(
+                    status_code == 206
+                    and forwarded_range
+                    and range_start > 0
+                    and is_mp4_url_verified(target_url)
+                )
+                magic_ok, verified_mime, magic_reason = verify_media_magic_bytes(
+                    first_chunk, is_range_continuation=is_range_cont
+                )
                 if not magic_ok:
                     log_event("security", f"Blocked suspicious file payload ({magic_reason}) from {target_url}")
                     self.send_response(415)
@@ -3172,12 +3665,26 @@ class ProxyHandler(BaseHTTPRequestHandler):
                     self.end_headers()
                     return
 
+                if (is_mp4 and verified_mime != "video/mp4") or (not is_mp4 and verified_mime == "video/mp4"):
+                    log_event(
+                        "security",
+                        f"Blocked media stream due to extension/MIME mismatch (ext={verified_ext}, mime={verified_mime}): {target_url}"
+                    )
+                    self.send_response(415)
+                    self.send_header("Connection", "close")
+                    self.end_headers()
+                    return
+
+                if not is_range_cont and range_start == 0 and len(first_chunk) >= 32 and verified_mime == "video/mp4":
+                    mark_mp4_url_verified(target_url)
+
                 self.send_response(status_code)
                 self.send_header("Content-Type", verified_mime)
                 self.send_header("Content-Disposition", "inline")
                 self.send_header("X-Content-Type-Options", "nosniff")
                 self.send_header("X-Frame-Options", "DENY")
-                self.send_header("Content-Security-Policy", "default-src 'none'; img-src 'self' data: blob:; media-src 'self' blob:; style-src 'unsafe-inline'")
+                self.send_header("Cross-Origin-Resource-Policy", "same-origin")
+                self.send_header("Content-Security-Policy", "default-src 'none'; img-src 'self' data: blob:; media-src 'self' blob:; style-src 'unsafe-inline'; object-src 'none'; frame-src 'none'; frame-ancestors 'none'")
                 if content_len_str:
                     self.send_header("Content-Length", content_len_str)
                 if content_range:
@@ -3423,6 +3930,60 @@ class DISPLAY_DEVICEW(ctypes.Structure):
     ]
 
 
+INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+
+# Explicit 64-bit safe argtypes/restype declarations for Win32 Telemetry APIs
+user32.EnumDisplayDevicesW.argtypes = [
+    wintypes.LPCWSTR,
+    wintypes.DWORD,
+    ctypes.POINTER(DISPLAY_DEVICEW),
+    wintypes.DWORD,
+]
+user32.EnumDisplayDevicesW.restype = wintypes.BOOL
+
+kernel32.GlobalMemoryStatusEx.argtypes = [ctypes.POINTER(MEMORYSTATUSEX)]
+kernel32.GlobalMemoryStatusEx.restype = wintypes.BOOL
+
+kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+
+kernel32.Process32FirstW.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
+kernel32.Process32FirstW.restype = wintypes.BOOL
+
+kernel32.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
+kernel32.Process32NextW.restype = wintypes.BOOL
+
+kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+kernel32.OpenProcess.restype = wintypes.HANDLE
+
+kernel32.GetProcessTimes.argtypes = [
+    wintypes.HANDLE,
+    ctypes.POINTER(FILETIME),
+    ctypes.POINTER(FILETIME),
+    ctypes.POINTER(FILETIME),
+    ctypes.POINTER(FILETIME),
+]
+kernel32.GetProcessTimes.restype = wintypes.BOOL
+
+kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+kernel32.CloseHandle.restype = wintypes.BOOL
+
+if hasattr(kernel32, "K32GetProcessMemoryInfo"):
+    kernel32.K32GetProcessMemoryInfo.argtypes = [
+        wintypes.HANDLE,
+        ctypes.POINTER(PROCESS_MEMORY_COUNTERS_EX),
+        wintypes.DWORD,
+    ]
+    kernel32.K32GetProcessMemoryInfo.restype = wintypes.BOOL
+elif hasattr(ctypes.windll, "psapi") and hasattr(ctypes.windll.psapi, "GetProcessMemoryInfo"):
+    ctypes.windll.psapi.GetProcessMemoryInfo.argtypes = [
+        wintypes.HANDLE,
+        ctypes.POINTER(PROCESS_MEMORY_COUNTERS_EX),
+        wintypes.DWORD,
+    ]
+    ctypes.windll.psapi.GetProcessMemoryInfo.restype = wintypes.BOOL
+
+
 def _detect_primary_gpu_name() -> str:
     try:
         dd = DISPLAY_DEVICEW()
@@ -3470,7 +4031,6 @@ class AppResourceMonitor:
         self.thread_count = 1
 
         self._prev_proc_times = {}      # pid -> int (100-ns kernel+user ticks)
-        self._prev_gpu_sub_times = {}   # pid -> int (100-ns ticks for gpu subprocess fallback)
         self._prev_sample_ts = time.perf_counter()
 
         self._pdh_dll = None
@@ -3495,12 +4055,29 @@ class AppResourceMonitor:
     def _init_pdh_gpu_counter(self):
         try:
             self._pdh_dll = ctypes.windll.pdh
+            self._pdh_dll.PdhOpenQueryW.argtypes = [wintypes.LPCWSTR, ctypes.c_size_t, ctypes.POINTER(ctypes.c_void_p)]
+            self._pdh_dll.PdhOpenQueryW.restype = wintypes.LONG
+            self._pdh_dll.PdhCollectQueryData.argtypes = [ctypes.c_void_p]
+            self._pdh_dll.PdhCollectQueryData.restype = wintypes.LONG
+            self._pdh_dll.PdhCloseQuery.argtypes = [ctypes.c_void_p]
+            self._pdh_dll.PdhCloseQuery.restype = wintypes.LONG
+            self._pdh_dll.PdhGetFormattedCounterArrayW.argtypes = [
+                ctypes.c_void_p,
+                wintypes.DWORD,
+                ctypes.POINTER(wintypes.DWORD),
+                ctypes.POINTER(wintypes.DWORD),
+                ctypes.c_void_p,
+            ]
+            self._pdh_dll.PdhGetFormattedCounterArrayW.restype = wintypes.LONG
+
             q = ctypes.c_void_p(0)
             if self._pdh_dll.PdhOpenQueryW(None, 0, ctypes.byref(q)) != 0:
                 return
             c = ctypes.c_void_p(0)
             path = "\\GPU Engine(*)\\Utilization Percentage"
             add_fn = getattr(self._pdh_dll, "PdhAddEnglishCounterW", self._pdh_dll.PdhAddCounterW)
+            add_fn.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR, ctypes.c_size_t, ctypes.POINTER(ctypes.c_void_p)]
+            add_fn.restype = wintypes.LONG
             if add_fn(q, wintypes.LPCWSTR(path), 0, ctypes.byref(c)) != 0:
                 self._pdh_dll.PdhCloseQuery(q)
                 return
@@ -3520,11 +4097,16 @@ class AppResourceMonitor:
             self._pdh_available = False
 
     def _enumerate_app_process_tree(self) -> tuple[set[int], int]:
-        """Returns (set_of_pids_in_app_tree, total_threads_in_tree)."""
+        """
+        Returns (set_of_pids_in_app_tree, total_threads_in_tree) strictly restricted
+        to this wallpaper application's process tree (root Python/PyInstaller host +
+        its child msedgewebview2.exe processes), excluding external browsers or OS utilities.
+        """
         parent_map = {}
         threads_map = {}
+        exe_map = {}
         snap = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
-        if snap == ctypes.c_void_p(-1).value or not snap:
+        if not snap or snap == INVALID_HANDLE_VALUE or snap == -1:
             return {self.root_pid}, 1
 
         try:
@@ -3536,11 +4118,23 @@ class AppResourceMonitor:
                 ppid = int(pe.th32ParentProcessID)
                 parent_map[pid] = ppid
                 threads_map[pid] = int(pe.cntThreads)
+                exe_map[pid] = str(pe.szExeFile or "").strip().lower()
                 ok = kernel32.Process32NextW(snap, ctypes.byref(pe))
         except Exception:
             pass
         finally:
             kernel32.CloseHandle(snap)
+
+        own_exe = os.path.basename(sys.executable or "").strip().lower()
+        allowed_child_exes = {
+            "msedgewebview2.exe",
+            "python.exe",
+            "pythonw.exe",
+            "danbooruwallpaper.exe",
+            "danbooru_service.exe",
+        }
+        if own_exe:
+            allowed_child_exes.add(own_exe)
 
         tree_pids = {self.root_pid}
         added = True
@@ -3548,8 +4142,10 @@ class AppResourceMonitor:
             added = False
             for pid, ppid in parent_map.items():
                 if pid not in tree_pids and ppid in tree_pids:
-                    tree_pids.add(pid)
-                    added = True
+                    child_exe = exe_map.get(pid, "")
+                    if child_exe in allowed_child_exes:
+                        tree_pids.add(pid)
+                        added = True
 
         total_threads = sum(threads_map.get(p, 1) for p in tree_pids)
         return tree_pids, max(1, total_threads)
@@ -3557,7 +4153,7 @@ class AppResourceMonitor:
     def _query_process_ticks_and_ram(self, pid: int) -> tuple[int, int, int]:
         """Returns (cpu_100ns_ticks, working_set_bytes, private_bytes) for a single PID."""
         h_proc = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, wintypes.DWORD(pid))
-        if not h_proc:
+        if not h_proc or h_proc == INVALID_HANDLE_VALUE or h_proc == -1:
             return 0, 0, 0
         ticks = 0
         ws_bytes = 0
@@ -3595,7 +4191,12 @@ class AppResourceMonitor:
         return ticks, ws_bytes, priv_bytes
 
     def _query_pdh_gpu_utilization(self, tree_pids: set[int]) -> tuple[bool, float]:
-        """Queries Windows PDH \\GPU Engine(*)\\Utilization Percentage filtered by tree_pids."""
+        """
+        Queries Windows PDH \\GPU Engine(*)\\Utilization Percentage strictly for PIDs in tree_pids.
+        Follows Task Manager's per-process GPU methodology by summing across the application's PIDs
+        per GPU engine type (3D, Compute, VideoDecode, Copy, etc.) and taking the highest utilized
+        engine plane for the application so orthogonal engine planes are never double-counted.
+        """
         if not self._pdh_available or not self._pdh_dll or not self._pdh_query:
             return False, 0.0
         try:
@@ -3627,21 +4228,26 @@ class AppResourceMonitor:
 
             items_ptr = ctypes.cast(raw_buf, ctypes.POINTER(PDH_FMT_COUNTERVALUE_ITEM_W))
             pid_tokens = tuple(f"pid_{p}_" for p in tree_pids)
-            app_gpu_sum = 0.0
-            matched_any_pid = False
+            engine_totals = {}
 
             for i in range(item_count.value):
                 item = items_ptr[i]
                 name = (item.szName or "").lower()
-                val = float(item.FmtValue.doubleValue or 0.0)
-                if val < 0.0 or val > 100.0:
+                if not any(tok in name for tok in pid_tokens):
                     continue
-                if any(tok in name for tok in pid_tokens):
-                    matched_any_pid = True
-                    app_gpu_sum += val
+                val = float(item.FmtValue.doubleValue or 0.0)
+                if val <= 0.0 or val > 100.0:
+                    continue
+                luid_match = re.search(r"(luid_0x[0-9a-f]+_0x[0-9a-f]+_phys_\d+)", name)
+                luid_key = luid_match.group(1) if luid_match else "gpu0"
+                eng_idx = name.find("engtype_")
+                eng_type = name[eng_idx:] if eng_idx >= 0 else "engtype_default"
+                eng_key = f"{luid_key}_{eng_type}"
+                engine_totals[eng_key] = engine_totals.get(eng_key, 0.0) + val
 
-            if matched_any_pid:
-                return True, max(0.0, min(100.0, app_gpu_sum))
+            if engine_totals:
+                app_gpu_pct = max(engine_totals.values())
+                return True, max(0.0, min(100.0, app_gpu_pct))
             return True, 0.0
         except Exception:
             return False, 0.0
@@ -3686,12 +4292,11 @@ class AppResourceMonitor:
         ram_pct = max(0.0, min(100.0, (ws_mb / max(1.0, self.total_phys_mb)) * 100.0))
 
         pdh_ok, gpu_pct = self._query_pdh_gpu_utilization(tree_pids)
-        if not pdh_ok or (gpu_pct == 0.0 and child_ticks_delta > 0):
-            # When PDH GPU counters are unavailable or masked by driver privileges,
-            # estimate WebView2 compositor/GPU child activity from active child process time
-            single_core_ticks = dt * 10_000_000.0
-            est_gpu = (child_ticks_delta / max(1.0, single_core_ticks)) * 45.0
-            gpu_pct = max(gpu_pct, min(100.0, est_gpu))
+        if not pdh_ok and child_ticks_delta > 0 and wall_capacity_ticks > 0:
+            # Strictly only if Windows PDH is unavailable on the system, estimate app GPU activity
+            # proportional to the app's own child WebView2 CPU share (never inflating single-core ticks)
+            est_gpu = (child_ticks_delta / wall_capacity_ticks) * 100.0
+            gpu_pct = max(0.0, min(100.0, est_gpu))
 
         self.current_cpu_pct = round(cpu_pct, 1)
         self.current_ram_mb = round(ws_mb, 1)
@@ -3777,9 +4382,14 @@ class ResourceGraphDialog(tk.Toplevel):
 
         width = 780
         height = 500
-        parent.update_idletasks()
-        px = parent.winfo_x()
-        py = parent.winfo_y()
+        anchor_win = (
+            SETTINGS_DIALOG_INSTANCE
+            if (SETTINGS_DIALOG_INSTANCE is not None and getattr(SETTINGS_DIALOG_INSTANCE, "is_open", False))
+            else parent
+        )
+        anchor_win.update_idletasks()
+        px = anchor_win.winfo_x()
+        py = anchor_win.winfo_y()
         sw = self.winfo_screenwidth()
         sh = self.winfo_screenheight()
 
@@ -3796,7 +4406,7 @@ class ResourceGraphDialog(tk.Toplevel):
 
         self.title_lbl = tk.Label(
             self.header,
-            text="📊 PERFORMANCE — RESOURCE GRAPH (TASK MANAGER VIEW)",
+            text="📊 PERFORMANCE — RESOURCE GRAPH",
             font=("Segoe UI", 10, "bold"),
         )
         self.title_lbl.pack(side="left")
@@ -3984,13 +4594,6 @@ class ResourceGraphDialog(tk.Toplevel):
         self.pause_graph_btn.configure(
             text="▶ Resume Graph" if self._graph_paused else "⏸ Pause Graph"
         )
-
-    def _get_ram_scale_ceiling_mb(self) -> float:
-        peak_seen = max(max(self.monitor.ram_mb_history, default=128.0), 128.0)
-        for step in (256.0, 512.0, 1024.0, 2048.0, 4096.0, 8192.0, 16384.0):
-            if peak_seen <= step * 0.85:
-                return step
-        return max(1024.0, round(peak_seen * 1.25, -2))
 
     def apply_theme(self):
         is_dark = (CURRENT_THEME == "dark")
@@ -4348,6 +4951,14 @@ class SettingsDialog(tk.Toplevel):
     - Tab 3: Logs (PAUSE APPLICATION master button, Glossary button, Clear Logs button, smart log history)
     """
     NUMERIC_SPECS = {
+        "targetfps": {
+            "label": "Target FPS (15 – 240):",
+            "min": 15,
+            "max": 240,
+            "default": 60,
+            "is_float": False,
+            "precision": 0,
+        },
         "scrollspeed": {
             "label": "Scroll Speed (0.1 – 600 px/s):",
             "min": 0.1,
@@ -4413,7 +5024,7 @@ class SettingsDialog(tk.Toplevel):
             "precision": 0,
         },
         "masonrytiles": {
-            "label": "Tile Count (4 – 36):",
+            "label": "Target Tile Count (4 – 36):",
             "min": 4,
             "max": 36,
             "default": 12,
@@ -4460,6 +5071,7 @@ class SettingsDialog(tk.Toplevel):
         self._last_rendered_post_id = None
         self._last_rendered_screen_id = None
         self._last_rendered_tags_sig = None
+        self._current_displayed_post_id = None
 
         self._themed_frames = []
         self._themed_borders = []
@@ -4482,9 +5094,9 @@ class SettingsDialog(tk.Toplevel):
         self.configure(bg=self.border_col)
 
         width = 650
-        height = 700
         sw = self.winfo_screenwidth()
         sh = self.winfo_screenheight()
+        height = min(760, max(700, sh - 40))
 
         cfg = load_app_config()
         default_x = max(20, (sw - width) // 2)
@@ -4567,7 +5179,10 @@ class SettingsDialog(tk.Toplevel):
             "logs": self.tab_logs,
         }
         self._tab_header_widgets = {}
-        self.active_settings_tab = "display" if (USERNAME and API_KEY) else "credentials"
+        if _RUNTIME_LAST_SETTINGS_TAB in ("credentials", "display", "logs"):
+            self.active_settings_tab = _RUNTIME_LAST_SETTINGS_TAB
+        else:
+            self.active_settings_tab = "display" if (USERNAME and API_KEY) else "credentials"
 
         for tab_key, tab_title in (
             ("credentials", "Credentials"),
@@ -4613,10 +5228,12 @@ class SettingsDialog(tk.Toplevel):
         self._poll_display_status()
 
     def _select_settings_tab(self, tab_key: str):
-        """Switches the active Application Settings tab and refreshes theme-aware tab styling."""
+        """Switches the active Application Settings tab, records it for runtime reopen, and refreshes tab styling."""
+        global _RUNTIME_LAST_SETTINGS_TAB
         if tab_key not in self._tab_frames_by_key:
             return
         self.active_settings_tab = tab_key
+        _RUNTIME_LAST_SETTINGS_TAB = tab_key
         self._hide_all_popups()
         for k, frm in self._tab_frames_by_key.items():
             if k != tab_key:
@@ -4779,10 +5396,17 @@ class SettingsDialog(tk.Toplevel):
         pad_frame.pack(fill="both", expand=True, padx=16, pady=10)
         self._themed_frames.append(pad_frame)
 
-        global CONNECTED_SCREENS
-        CONNECTED_SCREENS = enumerate_connected_monitors()
+        global CONNECTED_SCREENS, _RUNTIME_LAST_SELECTED_SCREEN_ID
+        refresh_connected_screens_preserving_ids()
         self.screen_map = {s["label"]: s["id"] for s in CONNECTED_SCREENS}
+        id_to_label = {s["id"]: s["label"] for s in CONNECTED_SCREENS}
         screen_labels = [s["label"] for s in CONNECTED_SCREENS]
+
+        initial_screen_label = screen_labels[0]
+        if _RUNTIME_LAST_SELECTED_SCREEN_ID and _RUNTIME_LAST_SELECTED_SCREEN_ID in id_to_label:
+            initial_screen_label = id_to_label[_RUNTIME_LAST_SELECTED_SCREEN_ID]
+        else:
+            _RUNTIME_LAST_SELECTED_SCREEN_ID = self.screen_map.get(initial_screen_label, "screen_1")
 
         # 1. Screen Selector Dropdown
         screen_row = tk.Frame(pad_frame, bg=self.bg_base)
@@ -4796,7 +5420,7 @@ class SettingsDialog(tk.Toplevel):
         scr_lbl.pack(side="left")
         self._themed_labels_dark.append(scr_lbl)
 
-        self.selected_screen_label = tk.StringVar(value=screen_labels[0])
+        self.selected_screen_label = tk.StringVar(self, value=initial_screen_label)
         self.screen_combo = ttk.Combobox(
             screen_row, textvariable=self.selected_screen_label,
             values=screen_labels, state="readonly"
@@ -4804,21 +5428,138 @@ class SettingsDialog(tk.Toplevel):
         self.screen_combo.pack(side="right", fill="x", expand=True)
         self.screen_combo.bind("<<ComboboxSelected>>", self._on_screen_selection_changed)
 
-        # 2. Display Wallpaper Checkbox
+        # 2. Display Wallpaper Slide Switch (Left) & Pause During Full Screen Application Slide Switch (Right)
         enable_row = tk.Frame(pad_frame, bg=self.bg_base)
-        enable_row.pack(fill="x", pady=(3, 4))
+        enable_row.pack(fill="x", pady=(3, 2))
         self._themed_frames.append(enable_row)
 
-        self.screen_enabled_var = tk.BooleanVar(value=True)
-        self.screen_enable_chk = tk.Checkbutton(
+        self.screen_enabled_var = tk.BooleanVar(self, value=True)
+        self.screen_enable_switch = tk.Canvas(
+            enable_row,
+            width=42,
+            height=22,
+            bg=self.bg_base,
+            bd=0,
+            highlightthickness=0,
+            cursor="hand2",
+        )
+        self.screen_enable_switch.pack(side="left", padx=(0, 8))
+        self.screen_enable_switch.bind("<Button-1>", self._on_toggle_screen_enable_switch)
+
+        self.screen_enable_lbl = tk.Label(
             enable_row,
             text="Display wallpaper on this screen",
-            variable=self.screen_enabled_var,
-            bg=self.bg_base, fg=self.text_dark, activebackground=self.bg_base,
-            font=("Segoe UI", 9, "bold"), cursor="hand2",
-            command=self._schedule_live_apply
+            font=("Segoe UI", 9, "bold"),
+            fg=self.text_dark,
+            bg=self.bg_base,
+            cursor="hand2",
+            anchor="w",
         )
-        self.screen_enable_chk.pack(anchor="w")
+        self.screen_enable_lbl.pack(side="left")
+        self.screen_enable_lbl.bind("<Button-1>", self._on_toggle_screen_enable_switch)
+        self._themed_labels_dark.append(self.screen_enable_lbl)
+        self._draw_screen_enable_switch()
+
+        # Right side of enable_row: "Pause during full screen application" On/Off Switch + Title
+        self.fullscreen_pause_wrap = tk.Frame(enable_row, bg=self.bg_base)
+        self.fullscreen_pause_wrap.pack(side="right")
+        self._themed_frames.append(self.fullscreen_pause_wrap)
+
+        self.pause_fullscreen_var = tk.BooleanVar(self, value=True)
+        self.fullscreen_pause_switch = tk.Canvas(
+            self.fullscreen_pause_wrap,
+            width=42,
+            height=22,
+            bg=self.bg_base,
+            bd=0,
+            highlightthickness=0,
+            cursor="hand2",
+        )
+        self.fullscreen_pause_switch.pack(side="left", padx=(0, 8))
+        self.fullscreen_pause_switch.bind("<Button-1>", self._on_toggle_fullscreen_pause_switch)
+
+        self.fullscreen_pause_lbl = tk.Label(
+            self.fullscreen_pause_wrap,
+            text="Pause during full screen application",
+            font=("Segoe UI", 9, "bold"),
+            fg=self.text_dark,
+            bg=self.bg_base,
+            cursor="hand2",
+            anchor="w",
+        )
+        self.fullscreen_pause_lbl.pack(side="left")
+        self.fullscreen_pause_lbl.bind("<Button-1>", self._on_toggle_fullscreen_pause_switch)
+        self._themed_labels_dark.append(self.fullscreen_pause_lbl)
+        self._draw_fullscreen_pause_switch()
+
+        # 2b. Per-Screen V-Sync Button ("V-Sync On" / "V-Sync Off") & Conditional Target FPS Input Box
+        self.vsync_row = tk.Frame(pad_frame, bg=self.bg_base)
+        self.vsync_row.pack(fill="x", pady=(1, 4))
+        self._themed_frames.append(self.vsync_row)
+
+        self.vsync_var = tk.BooleanVar(self, value=True)
+        self.vsync_btn = tk.Button(
+            self.vsync_row,
+            text="V-Sync On",
+            bg="#0067c0",
+            fg="#ffffff",
+            activebackground="#005da6",
+            activeforeground="#ffffff",
+            font=("Segoe UI", 9, "bold"),
+            bd=0,
+            relief="flat",
+            padx=14,
+            pady=3,
+            cursor="hand2",
+            command=self._on_toggle_vsync,
+        )
+        self.vsync_btn.pack(side="left")
+
+        self.target_fps_subframe = tk.Frame(self.vsync_row, bg=self.bg_base)
+        self._themed_frames.append(self.target_fps_subframe)
+
+        self.target_fps_lbl = tk.Label(
+            self.target_fps_subframe,
+            text="Target FPS (15 – 240):",
+            font=("Segoe UI", 9, "bold"),
+            fg=self.text_dark,
+            bg=self.bg_base,
+        )
+        self.target_fps_lbl.pack(side="left", padx=(12, 6))
+        self._themed_labels_dark.append(self.target_fps_lbl)
+
+        fps_box = tk.Frame(
+            self.target_fps_subframe,
+            bg=self.input_bg,
+            highlightthickness=1,
+            highlightbackground=self.border_col,
+        )
+        fps_box.pack(side="left")
+        self._themed_borders.append(fps_box)
+
+        fps_entry = tk.Entry(
+            fps_box,
+            bg=self.input_bg,
+            fg=self.text_dark,
+            insertbackground=self.text_dark,
+            bd=0,
+            width=6,
+            font=("Segoe UI", 9, "bold"),
+            relief="flat",
+            justify="center",
+        )
+        fps_entry.pack(fill="x", padx=6, pady=2)
+        fps_entry.insert(0, "60")
+        self._themed_entries.append((fps_box, fps_entry))
+
+        fps_var = tk.DoubleVar(self, value=60.0)
+        fps_entry.bind("<KeyRelease>", lambda e, k="targetfps": self._on_entry_key_release(k, e))
+        fps_entry.bind("<FocusOut>", lambda e, k="targetfps": self._on_entry_commit(k, e))
+        fps_entry.bind("<Return>", lambda e, k="targetfps": self._on_entry_commit(k, e))
+
+        self.prop_entries["targetfps"] = fps_entry
+        self.prop_vars["targetfps"] = fps_var
+        self._update_vsync_ui_state()
 
         # 3. Per-Screen Search & Playback Sub-Panel (No Minimize Button)
         pal = THEME_PALETTES[CURRENT_THEME]
@@ -5106,23 +5847,27 @@ class SettingsDialog(tk.Toplevel):
 
         self.media_tags_hdr_lbl = tk.Label(
             self.media_tags_hdr_row,
-            text="DISPLAYED MEDIA TAGS (CLICK TAG TO ADD TO SEARCH):",
-            font=("Segoe UI", 8, "bold"),
+            text="DISPLAYED MEDIA TAGS (CLICK TO ADD):",
+            font=("Segoe UI", 9, "bold"),
             fg=self.text_muted,
             bg=self.bg_base,
         )
         self.media_tags_hdr_lbl.pack(side="left")
         self._themed_labels_muted.append(self.media_tags_hdr_lbl)
 
+        post_link_fg = "#4da3ff" if CURRENT_THEME == "dark" else "#0067c0"
         self.media_tags_post_lbl = tk.Label(
             self.media_tags_hdr_row,
             text="",
-            font=("Segoe UI", 8, "bold"),
-            fg=self.text_muted,
+            font=("Segoe UI", 9, "bold", "underline"),
+            fg=post_link_fg,
             bg=self.bg_base,
+            cursor="arrow",
         )
         self.media_tags_post_lbl.pack(side="right")
-        self._themed_labels_muted.append(self.media_tags_post_lbl)
+        self.media_tags_post_lbl.bind("<Button-1>", self._on_post_link_clicked)
+        self.media_tags_post_lbl.bind("<Enter>", self._on_post_link_hover_enter)
+        self.media_tags_post_lbl.bind("<Leave>", self._on_post_link_hover_leave)
 
         self.media_tags_box_frame = tk.Frame(
             search_inner,
@@ -5172,7 +5917,7 @@ class SettingsDialog(tk.Toplevel):
         mode_lbl.pack(side="left")
         self._themed_labels_dark.append(mode_lbl)
 
-        self.mode_var = tk.StringVar(value="scroll")
+        self.mode_var = tk.StringVar(self, value="scroll")
         self.mode_combo = ttk.Combobox(
             mode_row,
             textvariable=self.mode_var,
@@ -5216,7 +5961,7 @@ class SettingsDialog(tk.Toplevel):
         dir_lbl.pack(side="left")
         self._themed_labels_dark.append(dir_lbl)
 
-        self.dir_var = tk.StringVar(value="left")
+        self.dir_var = tk.StringVar(self, value="left")
         dir_combo = ttk.Combobox(
             dir_row,
             textvariable=self.dir_var,
@@ -5309,19 +6054,17 @@ class SettingsDialog(tk.Toplevel):
 
         layout_row = tk.Frame(self.masonry_section_frame, bg=self.bg_base)
         layout_row.pack(fill="x", pady=(2, 5))
+        layout_row.columnconfigure(0, weight=1, uniform="masonry_dual_btns")
+        layout_row.columnconfigure(1, weight=1, uniform="masonry_dual_btns")
+        self.masonry_layout_row = layout_row
         self._themed_frames.append(layout_row)
 
-        layout_lbl = tk.Label(
-            layout_row, text="Masonry Layout:", width=26, anchor="w",
-            font=("Segoe UI", 9), fg=self.text_dark, bg=self.bg_base
-        )
-        layout_lbl.pack(side="left")
-        self._themed_labels_dark.append(layout_lbl)
+        self.masonry_layout_var = tk.StringVar(self, value="mondrian")
+        self.masonry_edge_fill_var = tk.StringVar(self, value="blur")
 
-        self.masonry_layout_var = tk.StringVar(value="mondrian")
         self.masonry_layout_btn = tk.Button(
             layout_row,
-            text="Mondrian  ⇄",
+            text="Masonry Layout: Mondrian",
             bg="#0067c0",
             fg="#ffffff",
             activebackground="#005da6",
@@ -5330,20 +6073,37 @@ class SettingsDialog(tk.Toplevel):
             bd=0,
             relief="flat",
             padx=12,
-            pady=4,
+            pady=5,
             cursor="hand2",
             command=self._on_toggle_masonry_layout,
         )
-        self.masonry_layout_btn.pack(side="right", fill="x", expand=True)
+        self.masonry_layout_btn.grid(row=0, column=0, sticky="ew", padx=(0, 4))
+
+        self.masonry_edge_fill_btn = tk.Button(
+            layout_row,
+            text="Edge Fill: Blur",
+            bg="#0067c0",
+            fg="#ffffff",
+            activebackground="#005da6",
+            activeforeground="#ffffff",
+            font=("Segoe UI", 9, "bold"),
+            bd=0,
+            relief="flat",
+            padx=12,
+            pady=5,
+            cursor="hand2",
+            command=self._on_toggle_masonry_edge_fill,
+        )
+        self.masonry_edge_fill_btn.grid(row=0, column=1, sticky="ew", padx=(4, 0))
 
         for pkey in ("masonrytiles", "masonrygap", "masonrydelay"):
             self._create_numeric_row(self.masonry_section_frame, pkey, self.NUMERIC_SPECS[pkey])
 
         masonry_note = tk.Label(
             self.masonry_section_frame,
-            text="• Layout Button: Toggle live between 'Mondrian' (BSP Solver) and 'Rows' (Justified Google Photos Rows).\n"
-                 "• Next Media Pre-Staging: Pre-decodes & pre-solves the next flip in the background with zero memory bloat.\n"
-                 "• Animated GIFs and MP4 videos play through completely at least once before flipping.",
+            text="• Masonry Layout Button: Switch between 'Masonry Layout: Mondrian' (BSP Tree) and 'Masonry Layout: Rows' (Uncropped Rows).\n"
+                 "• Edge Fill Button: Switch between 'Edge Fill: Blur' (ambient edge blur) and 'Edge Fill: Black' (gap-matched black space).\n"
+                 "• Target Tile Count (4 – 36): Flexible ±25% solver window adjusts tile count & layout on flip to eliminate blur/cropping.",
             justify="left", anchor="w",
             font=("Segoe UI", 8), fg=self.text_muted, bg=self.bg_base
         )
@@ -5369,6 +6129,10 @@ class SettingsDialog(tk.Toplevel):
             screen_row,
             scr_lbl,
             enable_row,
+            self.fullscreen_pause_wrap,
+            self.vsync_row,
+            self.target_fps_subframe,
+            self.target_fps_lbl,
             self.search_subpanel,
             search_inner,
             self.search_controls_row,
@@ -5377,7 +6141,6 @@ class SettingsDialog(tk.Toplevel):
             self.tag_label,
             self.media_tags_hdr_row,
             self.media_tags_hdr_lbl,
-            self.media_tags_post_lbl,
             mode_row,
             mode_lbl,
             self.mode_sections_holder,
@@ -5395,7 +6158,6 @@ class SettingsDialog(tk.Toplevel):
             self.masonry_section_frame,
             masonry_hdr,
             layout_row,
-            layout_lbl,
             masonry_note,
             btn_row,
         ):
@@ -5404,7 +6166,11 @@ class SettingsDialog(tk.Toplevel):
             except Exception:
                 pass
 
-        self._load_screen_values_into_form(self._get_current_selected_screen_id())
+        try:
+            self._load_screen_values_into_form(self._get_current_selected_screen_id())
+        except Exception as e:
+            log_event("ui", f"Warning loading initial screen values into SettingsDialog: {e}")
+            self._update_mode_sections_visibility()
 
     # -------------------------------------------------------------------------
     # DANBOORU TAG COLORING, DYNAMIC HEIGHT SCALING, FOCUS-OUT AUTO-SEARCH,
@@ -5481,10 +6247,12 @@ class SettingsDialog(tk.Toplevel):
             current_height = int(self.tag_input.cget("height") or 1)
             if current_height != target_lines:
                 self.tag_input.configure(height=target_lines)
-                base_h = 700
+                base_h = 760
                 extra_h = (target_lines - 1) * 19
                 cur_w = max(650, self.winfo_width())
-                self.geometry(f"{cur_w}x{base_h + extra_h}")
+                sh = self.winfo_screenheight()
+                target_h = min(max(700, sh - 32), base_h + extra_h)
+                self.geometry(f"{cur_w}x{target_h}")
 
                 # Keep open dropdowns anchored cleanly below the resized Search TAGS box
                 self.update_idletasks()
@@ -5610,10 +6378,18 @@ class SettingsDialog(tk.Toplevel):
             st = get_screen_runtime_state(sid)
             st["wallpaper_paused"] = not bool(st.get("wallpaper_paused", False))
             now_paused = st["wallpaper_paused"]
+            fs_paused = bool(st.get("fullscreen_paused", False))
         self._update_pause_btn_appearance()
         push_pause_states_to_webviews(sid)
-        state_word = "paused" if now_paused else "resumed"
-        log_event("ui", f"Wallpaper motion {state_word} on {sid} (GIFs and MP4 videos remain playing).")
+        if now_paused:
+            log_event(
+                "ui",
+                f"Wallpaper paused on {sid} (stopped background preloader, tag pool workers, video decode & animations to conserve resources).",
+            )
+        else:
+            log_event("ui", f"Wallpaper resumed on {sid}.")
+            if not fs_paused and self.screen_enabled_var.get():
+                ensure_screen_tag_pool_populated_async(sid, force_reset=False)
 
     def _restore_nav_buttons_after_cooldown(self):
         self._nav_cooldown_active = False
@@ -6233,6 +7009,37 @@ class SettingsDialog(tk.Toplevel):
                     f"Added media tag '{clean_tag}' to {self._get_current_selected_screen_id()} search bar (waiting for focus-out to auto-search).",
                 )
 
+    def _on_post_link_clicked(self, event=None):
+        """Opens the currently displayed Danbooru post in the user's default web browser when 'Post #' is clicked."""
+        post_id = getattr(self, "_current_displayed_post_id", None)
+        try:
+            pid = int(post_id or 0)
+        except (ValueError, TypeError):
+            pid = 0
+        if pid <= 0:
+            return
+        post_url = f"https://danbooru.donmai.us/posts/{pid}"
+        log_event("ui", f"Opening Post #{pid} in default web browser: {post_url}")
+        threading.Thread(
+            target=lambda u=post_url: webbrowser.open(u, new=2),
+            daemon=True,
+        ).start()
+
+    def _on_post_link_hover_enter(self, event=None):
+        if getattr(self, "_current_displayed_post_id", None):
+            hover_fg = "#80c2ff" if CURRENT_THEME == "dark" else "#004580"
+            try:
+                self.media_tags_post_lbl.configure(fg=hover_fg)
+            except tk.TclError:
+                pass
+
+    def _on_post_link_hover_leave(self, event=None):
+        base_fg = "#4da3ff" if CURRENT_THEME == "dark" else "#0067c0"
+        try:
+            self.media_tags_post_lbl.configure(fg=base_fg)
+        except tk.TclError:
+            pass
+
     def on_screen_media_displayed(self, screen_id, post_id, tags_list=None):
         """Called immediately when a screen WebView reports a newly displayed media item."""
         if not self.is_open:
@@ -6278,10 +7085,21 @@ class SettingsDialog(tk.Toplevel):
             self.media_tags_text.configure(state="normal")
             self.media_tags_text.delete("1.0", tk.END)
 
-            if post_id:
-                self.media_tags_post_lbl.configure(text=f"Post #{post_id} ({len(resolved_tags)} tags)")
+            post_link_fg = "#4da3ff" if CURRENT_THEME == "dark" else "#0067c0"
+            if post_id and int(post_id) > 0:
+                self._current_displayed_post_id = int(post_id)
+                self.media_tags_post_lbl.configure(
+                    text=f"Post #{int(post_id)} ({len(resolved_tags)} tags)",
+                    fg=post_link_fg,
+                    cursor="hand2",
+                )
             else:
-                self.media_tags_post_lbl.configure(text="")
+                self._current_displayed_post_id = None
+                self.media_tags_post_lbl.configure(
+                    text="",
+                    fg=post_link_fg,
+                    cursor="arrow",
+                )
 
             if not resolved_tags:
                 msg = (
@@ -6323,15 +7141,20 @@ class SettingsDialog(tk.Toplevel):
 
         sid = self._get_current_selected_screen_id()
         sc_enabled = bool(self.screen_enabled_var.get())
-        query = normalize_tag_query(self._get_tag_input_value())
+        applied_raw = self._last_applied_tags_by_screen.get(sid)
+        if applied_raw is None:
+            applied_raw = get_screen_tags(sid)
+        query = normalize_tag_query(applied_raw)
+        pkey = canonical_pool_key(query)
 
         with DATA_LOCK:
             st = get_screen_runtime_state(sid)
             scr_paused = bool(st.get("wallpaper_paused", False))
-            _, pool = get_or_create_tag_pool_locked(query)
-            p_status = dict(pool.get("last_status") or {})
-            buf_len = len(pool.get("posts") or [])
-            is_fetching = bool(pool.get("is_fetching", False))
+            fs_paused = bool(st.get("fullscreen_paused", False))
+            pool = TAG_POOLS.get(pkey)
+            p_status = dict(pool.get("last_status") or {}) if pool else {}
+            buf_len = len(pool.get("posts") or []) if pool else 0
+            is_fetching = bool(pool.get("is_fetching", False)) if pool else False
 
         try:
             pal = THEME_PALETTES[CURRENT_THEME]
@@ -6347,6 +7170,10 @@ class SettingsDialog(tk.Toplevel):
                 bg_c = pal["btn_bg"]
                 fg_c = "#4da3ff" if CURRENT_THEME == "dark" else "#0067c0"
                 txt = "⏸ Screen Paused"
+            elif fs_paused:
+                bg_c = pal["btn_bg"]
+                fg_c = "#4da3ff" if CURRENT_THEME == "dark" else "#0067c0"
+                txt = "⏸ Fullscreen App"
             elif is_fetching and buf_len == 0:
                 bg_c = pal["btn_bg"]
                 fg_c = "#4da3ff" if CURRENT_THEME == "dark" else "#0067c0"
@@ -6391,8 +7218,11 @@ class SettingsDialog(tk.Toplevel):
         elif active_mode == "masonry":
             self.masonry_section_frame.pack(fill="both", expand=True)
 
+    def _get_active_numeric_spec(self, pkey):
+        return self.NUMERIC_SPECS[pkey]
+
     def _format_numeric_value(self, pkey, val):
-        spec = self.NUMERIC_SPECS[pkey]
+        spec = self._get_active_numeric_spec(pkey)
         if not spec["is_float"]:
             return str(int(round(float(val))))
         rounded = round(float(val), spec["precision"])
@@ -6404,7 +7234,7 @@ class SettingsDialog(tk.Toplevel):
         return text
 
     def _clamp_numeric_value(self, pkey, raw_val):
-        spec = self.NUMERIC_SPECS[pkey]
+        spec = self._get_active_numeric_spec(pkey)
         clamped = max(float(spec["min"]), min(float(spec["max"]), float(raw_val)))
         if spec["is_float"]:
             res = round(clamped, spec["precision"])
@@ -6446,7 +7276,7 @@ class SettingsDialog(tk.Toplevel):
         pentry.insert(0, self._format_numeric_value(pkey, spec["default"]))
         self._themed_entries.append((pbox, pentry))
 
-        slider_var = tk.DoubleVar(value=float(spec["default"]))
+        slider_var = tk.DoubleVar(self, value=float(spec["default"]))
         slider = ttk.Scale(
             ctrl_container,
             from_=float(spec["min"]),
@@ -6523,7 +7353,7 @@ class SettingsDialog(tk.Toplevel):
         except ValueError:
             return
 
-        spec = self.NUMERIC_SPECS[pkey]
+        spec = self._get_active_numeric_spec(pkey)
         slider_pos = max(float(spec["min"]), min(float(spec["max"]), typed_val))
 
         self._syncing_controls = True
@@ -6538,7 +7368,7 @@ class SettingsDialog(tk.Toplevel):
     def _on_entry_commit(self, pkey, event=None):
         if self._syncing_controls:
             return
-        spec = self.NUMERIC_SPECS[pkey]
+        spec = self._get_active_numeric_spec(pkey)
         raw_text = self.prop_entries[pkey].get().strip()
         try:
             parsed = float(raw_text)
@@ -6546,6 +7376,7 @@ class SettingsDialog(tk.Toplevel):
             parsed = float(self.prop_vars[pkey].get() if pkey in self.prop_vars else spec["default"])
 
         clamped = self._clamp_numeric_value(pkey, parsed)
+
         self._syncing_controls = True
         try:
             self.prop_vars[pkey].set(float(clamped))
@@ -6576,17 +7407,135 @@ class SettingsDialog(tk.Toplevel):
         return self.screen_map.get(lbl, "screen_1")
 
     def _on_screen_selection_changed(self, event=None):
+        global _RUNTIME_LAST_SELECTED_SCREEN_ID
         self._cancel_auto_tag_refresh_timer()
         self._hide_all_popups()
         sid = self._get_current_selected_screen_id()
+        _RUNTIME_LAST_SELECTED_SCREEN_ID = sid
         self._load_screen_values_into_form(sid)
+
+    def _update_masonry_edge_fill_btn_label(self):
+        cur_fill = _normalize_masonry_edge_fill_value(self.masonry_edge_fill_var.get())
+        if cur_fill == "black":
+            self.masonry_edge_fill_btn.configure(text="Edge Fill: Black")
+        else:
+            self.masonry_edge_fill_btn.configure(text="Edge Fill: Blur")
+
+    def _on_toggle_masonry_edge_fill(self):
+        cur_fill = _normalize_masonry_edge_fill_value(self.masonry_edge_fill_var.get())
+        new_fill = "black" if cur_fill == "blur" else "blur"
+        self.masonry_edge_fill_var.set(new_fill)
+        self._update_masonry_edge_fill_btn_label()
+        readable = "Black (Solid Gap-Matched Space)" if new_fill == "black" else "Blur (Ambient Tile Edge Blur)"
+        log_event("ui", f"Switched Edge Fill setting to: {readable}")
+        self._schedule_live_apply()
 
     def _update_masonry_layout_btn_label(self):
         cur = _normalize_masonry_layout_value(self.masonry_layout_var.get())
         if cur == "rows":
-            self.masonry_layout_btn.configure(text="Rows  ⇄")
+            self.masonry_layout_btn.configure(text="Masonry Layout: Rows")
         else:
-            self.masonry_layout_btn.configure(text="Mondrian  ⇄")
+            self.masonry_layout_btn.configure(text="Masonry Layout: Mondrian")
+        self._update_masonry_edge_fill_btn_label()
+
+    def _draw_pill_switch_canvas(self, canvas_widget, is_on: bool):
+        if not canvas_widget:
+            return
+        try:
+            canvas_widget.configure(bg=self.bg_base)
+            canvas_widget.delete("all")
+            if is_on:
+                track_fill = "#0067c0"
+                track_outline = "#005da6"
+                thumb_fill = "#ffffff"
+            else:
+                track_fill = "#34343e" if CURRENT_THEME == "dark" else "#c6c6ce"
+                track_outline = self.border_col
+                thumb_fill = "#dcdce4" if CURRENT_THEME == "dark" else "#ffffff"
+
+            # Pill track (x1=2, y1=2, x2=40, y2=20, radius=9)
+            canvas_widget.create_oval(2, 2, 20, 20, fill=track_fill, outline=track_outline, width=1)
+            canvas_widget.create_oval(22, 2, 40, 20, fill=track_fill, outline=track_outline, width=1)
+            canvas_widget.create_rectangle(11, 2, 31, 20, fill=track_fill, outline="")
+            canvas_widget.create_line(11, 2, 31, 2, fill=track_outline, width=1)
+            canvas_widget.create_line(11, 20, 31, 20, fill=track_outline, width=1)
+
+            # Sliding circular thumb (radius=7)
+            thumb_cx = 31 if is_on else 11
+            thumb_cy = 11
+            canvas_widget.create_oval(
+                thumb_cx - 7,
+                thumb_cy - 7,
+                thumb_cx + 7,
+                thumb_cy + 7,
+                fill=thumb_fill,
+                outline="",
+            )
+        except Exception:
+            pass
+
+    def _draw_screen_enable_switch(self):
+        if hasattr(self, "screen_enable_switch"):
+            self._draw_pill_switch_canvas(self.screen_enable_switch, bool(self.screen_enabled_var.get()))
+
+    def _draw_fullscreen_pause_switch(self):
+        if hasattr(self, "fullscreen_pause_switch"):
+            self._draw_pill_switch_canvas(self.fullscreen_pause_switch, bool(self.pause_fullscreen_var.get()))
+
+    def _on_toggle_screen_enable_switch(self, event=None):
+        self._defocus_tag_input_on_outside_click(event)
+        new_val = not bool(self.screen_enabled_var.get())
+        self.screen_enabled_var.set(new_val)
+        self._draw_screen_enable_switch()
+        sid = self._get_current_selected_screen_id()
+        log_event("ui", f"Toggled 'Display wallpaper on this screen' slide switch on {sid} to: {'ON' if new_val else 'OFF'}")
+        self._schedule_live_apply()
+
+    def _on_toggle_fullscreen_pause_switch(self, event=None):
+        self._defocus_tag_input_on_outside_click(event)
+        new_val = not bool(self.pause_fullscreen_var.get())
+        self.pause_fullscreen_var.set(new_val)
+        self._draw_fullscreen_pause_switch()
+        sid = self._get_current_selected_screen_id()
+        log_event("ui", f"Toggled 'Pause during full screen application' slide switch on {sid} to: {'ON' if new_val else 'OFF'}")
+        self._schedule_live_apply()
+
+    def _update_vsync_ui_state(self):
+        if not hasattr(self, "vsync_btn") or not hasattr(self, "target_fps_subframe"):
+            return
+        is_vsync_on = bool(self.vsync_var.get())
+        pal = THEME_PALETTES[CURRENT_THEME]
+        if is_vsync_on:
+            self.vsync_btn.configure(
+                text="V-Sync On",
+                bg="#0067c0",
+                fg="#ffffff",
+                activebackground="#005da6",
+                activeforeground="#ffffff",
+            )
+            self.target_fps_subframe.pack_forget()
+        else:
+            self.vsync_btn.configure(
+                text="V-Sync Off",
+                bg=pal["btn_bg"],
+                fg=self.text_dark,
+                activebackground=pal["btn_active"],
+                activeforeground=self.text_dark,
+            )
+            self.target_fps_subframe.pack(side="left", padx=(4, 0))
+
+    def _on_toggle_vsync(self):
+        self._defocus_tag_input_on_outside_click()
+        new_vsync = not bool(self.vsync_var.get())
+        self.vsync_var.set(new_vsync)
+        self._update_vsync_ui_state()
+        sid = self._get_current_selected_screen_id()
+        fps_val = int(round(float(self.prop_vars.get("targetfps", tk.DoubleVar(value=60.0)).get())))
+        log_event(
+            "ui",
+            f"Switched V-Sync on {sid} to: {'V-Sync On (Native Refresh)' if new_vsync else f'V-Sync Off (Target FPS: {fps_val})'}",
+        )
+        self._schedule_live_apply()
 
     def _on_toggle_masonry_layout(self):
         cur = _normalize_masonry_layout_value(self.masonry_layout_var.get())
@@ -6599,8 +7548,19 @@ class SettingsDialog(tk.Toplevel):
 
     def _load_screen_values_into_form(self, screen_id):
         sc_cfg = get_screen_config(screen_id)
-        self.screen_enabled_var.set(sc_cfg["enabled"])
+        enabled_val = bool(sc_cfg.get("enabled", screen_id == "screen_1"))
+        _LAST_SCREEN_ENABLED_STATE[screen_id] = enabled_val
+        self.screen_enabled_var.set(enabled_val)
+        self._draw_screen_enable_switch()
         props = sc_cfg["properties"]
+
+        pause_fs_val = _normalize_vsync_value(props.get("pausefullscreen", {}).get("value", True))
+        self.pause_fullscreen_var.set(pause_fs_val)
+        self._draw_fullscreen_pause_switch()
+
+        vsync_val = _normalize_vsync_value(props.get("vsync", {}).get("value", True))
+        self.vsync_var.set(vsync_val)
+        self._update_vsync_ui_state()
 
         tags_val = normalize_tag_query(props.get("searchtags", {}).get("value", DEFAULT_TAGS))
         self._last_applied_tags_by_screen[screen_id] = tags_val
@@ -6613,6 +7573,10 @@ class SettingsDialog(tk.Toplevel):
         if dir_val not in ("left", "right", "up", "down"):
             dir_val = "left"
         self.dir_var.set(dir_val)
+
+        mef_val = _normalize_masonry_edge_fill_value(props.get("masonryedgefill", {}).get("value", "blur"))
+        self.masonry_edge_fill_var.set(mef_val)
+        self._update_masonry_edge_fill_btn_label()
 
         ml_val = _normalize_masonry_layout_value(props.get("masonrylayout", {}).get("value", "mondrian"))
         self.masonry_layout_var.set(ml_val)
@@ -6631,8 +7595,13 @@ class SettingsDialog(tk.Toplevel):
                 if entry:
                     entry.delete(0, tk.END)
                     entry.insert(0, self._format_numeric_value(key, clamped))
+                slider_w = self.prop_sliders.get(key)
+                if slider_w is not None:
+                    slider_w.configure(command="")
                 if key in self.prop_vars:
                     self.prop_vars[key].set(float(clamped))
+                if slider_w is not None:
+                    slider_w.configure(command=lambda val, k=key: self._on_slider_moved(k, val))
         finally:
             self._syncing_controls = False
 
@@ -6696,9 +7665,16 @@ class SettingsDialog(tk.Toplevel):
         tags_changed = (canonical_pool_key(prev_tags) != canonical_pool_key(new_tags))
         s_props.setdefault("searchtags", {})["value"] = new_tags
 
+        active_vsync = bool(self.vsync_var.get())
+        active_pause_fs = bool(self.pause_fullscreen_var.get())
+        active_ml = _normalize_masonry_layout_value(self.masonry_layout_var.get())
+        active_mef = _normalize_masonry_edge_fill_value(self.masonry_edge_fill_var.get())
+        s_props.setdefault("vsync", {})["value"] = active_vsync
+        s_props.setdefault("pausefullscreen", {})["value"] = active_pause_fs
         s_props.setdefault("displaymode", {})["value"] = self.mode_var.get()
         s_props.setdefault("scrolldirection", {})["value"] = self.dir_var.get()
-        s_props.setdefault("masonrylayout", {})["value"] = _normalize_masonry_layout_value(self.masonry_layout_var.get())
+        s_props.setdefault("masonrylayout", {})["value"] = active_ml
+        s_props.setdefault("masonryedgefill", {})["value"] = active_mef
 
         self._syncing_controls = True
         try:
@@ -6724,19 +7700,24 @@ class SettingsDialog(tk.Toplevel):
                 if k in base_props and isinstance(val_obj, dict) and "value" in val_obj:
                     base_props[k]["value"] = val_obj["value"]
 
+        fs_Pause_cleared = False
         with DATA_LOCK:
             st = get_screen_runtime_state(sid)
-            st["tags"] = new_tags
-            pkey, _ = get_or_create_tag_pool_locked(new_tags)
-            st["pool_key"] = pkey
+            st["queued_tags"] = None
+            get_or_create_tag_pool_locked(new_tags)
             if tags_changed:
                 st["epoch"] += 1
                 st["seen_post_ids"].clear()
+            if (not active_pause_fs or not new_enabled) and st.get("fullscreen_paused", False):
+                st["fullscreen_paused"] = False
+                fs_Pause_cleared = True
 
         self._last_applied_tags_by_screen[sid] = new_tags
         store_project_json(project_data)
         push_properties_to_webview(sid, sync_geometry=enabled_changed)
-        if new_enabled and (enabled_changed or tags_changed):
+        if fs_Pause_cleared:
+            push_pause_states_to_webviews(sid)
+        if new_enabled and (enabled_changed or tags_changed or fs_Pause_cleared):
             ensure_screen_tag_pool_populated_async(sid, force_reset=False)
         self._render_displayed_media_tags_box(force=True)
         self._update_fill_btn_state()
@@ -6888,13 +7869,9 @@ class SettingsDialog(tk.Toplevel):
                 pass
 
         self.theme_btn.configure(text="Dark Mode" if CURRENT_THEME == "light" else "Light Mode")
-        self.screen_enable_chk.configure(
-            bg=self.bg_base,
-            fg=self.text_dark,
-            activebackground=self.bg_base,
-            activeforeground=self.text_dark,
-            selectcolor=self.input_bg,
-        )
+        self._draw_screen_enable_switch()
+        self._draw_fullscreen_pause_switch()
+        self._update_vsync_ui_state()
 
         # Update Display tab search & playback controls theme (all standardized height=28)
         self.status_frame.configure(highlightbackground=self.border_col)
@@ -6923,6 +7900,10 @@ class SettingsDialog(tk.Toplevel):
 
         self.media_tags_box_frame.configure(bg=self.input_bg, highlightbackground=self.border_col)
         self.media_tags_text.configure(bg=self.input_bg, fg=self.text_dark)
+        self.media_tags_post_lbl.configure(
+            bg=self.bg_base,
+            fg="#4da3ff" if CURRENT_THEME == "dark" else "#0067c0",
+        )
         self._configure_danbooru_color_tags()
         self._recolor_search_input_tags()
         self._render_displayed_media_tags_box(force=True)
@@ -7010,7 +7991,13 @@ class SettingsDialog(tk.Toplevel):
         self._hide_all_popups()
 
     def close_dialog(self):
+        global _RUNTIME_LAST_SETTINGS_TAB, _RUNTIME_LAST_SELECTED_SCREEN_ID
         self.is_open = False
+        try:
+            _RUNTIME_LAST_SETTINGS_TAB = self.active_settings_tab
+            _RUNTIME_LAST_SELECTED_SCREEN_ID = self._get_current_selected_screen_id()
+        except Exception:
+            pass
         try:
             cfg = load_app_config()
             cfg["settings_pos_x"] = self.winfo_x()
@@ -7170,13 +8157,17 @@ def initialize_startup_credentials_and_pools():
     transport_mode = "curl_cffi HTTP/2" if CURL_CFFI_AVAILABLE else "stdlib TLS 1.3 + DoH SNI fallback"
     log_event("auth", f"Active transport engine: {transport_mode}")
 
+    # Always start fetching media pools for enabled screens immediately so primary display begins playing right away
+    ensure_all_enabled_screen_pools_populated(force_reset=False)
+
     if user and key:
         log_event("auth", f"Loaded DPAPI-protected credentials for user '{user}'" + (f" (#{uid})" if uid else ""))
     else:
         log_event("auth", "No credentials configured yet; running in anonymous API mode (2-tag limit).")
-        open_settings_dialog_window()
-
-    ensure_all_enabled_screen_pools_populated(force_reset=False)
+        try:
+            open_settings_dialog_window()
+        except Exception as e:
+            log_event("ui", f"Failed to open startup settings window: {e}")
 
 
 def run_tkinter_ui():
@@ -7218,6 +8209,210 @@ def inject_and_sync_screen(screen_info, window, win_title):
     push_pause_states_to_webviews(sid)
 
 
+_IGNORED_FULLSCREEN_CLASS_NAMES = {
+    "Progman",
+    "WorkerW",
+    "SHELLDLL_DefView",
+    "Shell_TrayWnd",
+    "Shell_SecondaryTrayWnd",
+    "NotifyIconOverflowWindow",
+    "XamlExplorerHostIslandWindow",
+    "ForegroundStaging",
+    "MultitaskingViewFrame",
+    "Windows.UI.Core.CoreWindow",
+}
+
+
+def is_window_cloaked(hwnd) -> bool:
+    """Returns True if DWM reports the window as cloaked (e.g., suspended UWP app or on another Virtual Desktop)."""
+    if not dwmapi or not hwnd:
+        return False
+    try:
+        cloaked = ctypes.c_int(0)
+        hr = dwmapi.DwmGetWindowAttribute(
+            hwnd, DWMWA_CLOAKED, ctypes.byref(cloaked), ctypes.sizeof(cloaked)
+        )
+        return bool(hr == 0 and cloaked.value != 0)
+    except Exception:
+        return False
+
+
+def detect_fullscreen_monitors(screens_to_check: list) -> dict:
+    """
+    Inspects visible, non-minimized, non-cloaked top-level Win32 windows in Z-order to detect
+    whether a full screen application (such as a game or fullscreen video player) is covering each monitor.
+    """
+    result = {s["id"]: False for s in screens_to_check}
+    if not screens_to_check:
+        return result
+
+    own_pid = os.getpid()
+    desktop_hwnd = user32.GetDesktopWindow()
+    shell_hwnd = user32.GetShellWindow()
+    progman_hwnd = user32.FindWindowW("Progman", None)
+    with INJECTION_LOCK:
+        own_hwnds = set(DESKTOP_HWNDS.values())
+
+    excluded_hwnds = {0, desktop_hwnd, shell_hwnd, progman_hwnd} | own_hwnds
+    unresolved_screens = {s["id"]: s for s in screens_to_check}
+    class_buf = ctypes.create_unicode_buffer(256)
+
+    def _enum_top_windows(hwnd, lparam):
+        if not unresolved_screens:
+            return False
+        if hwnd in excluded_hwnds:
+            return True
+        if not user32.IsWindowVisible(hwnd) or user32.IsIconic(hwnd):
+            return True
+
+        pid = wintypes.DWORD(0)
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        if pid.value == own_pid:
+            return True
+
+        style = GetWindowLongPtrW(hwnd, GWL_STYLE) & 0xFFFFFFFF
+        if style & WS_CHILD:
+            return True
+
+        ex_style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & 0xFFFFFFFF
+        # Ignore click-through transparent HUD overlays (e.g., Discord/Steam/GPU overlays)
+        if (ex_style & WS_EX_TRANSPARENT) and (ex_style & WS_EX_LAYERED):
+            return True
+
+        if user32.GetClassNameW(hwnd, class_buf, 256) > 0:
+            cname = class_buf.value
+            if cname in _IGNORED_FULLSCREEN_CLASS_NAMES:
+                return True
+
+        if is_window_cloaked(hwnd):
+            return True
+
+        rc = wintypes.RECT()
+        if not user32.GetWindowRect(hwnd, ctypes.byref(rc)):
+            return True
+
+        win_w = rc.right - rc.left
+        win_h = rc.bottom - rc.top
+        if win_w < 240 or win_h < 180:
+            return True
+
+        client_rc = wintypes.RECT()
+        has_client = bool(user32.GetClientRect(hwnd, ctypes.byref(client_rc)))
+        client_w = (client_rc.right - client_rc.left) if has_client else win_w
+        client_h = (client_rc.bottom - client_rc.top) if has_client else win_h
+
+        for sid, s_info in list(unresolved_screens.items()):
+            mx = int(s_info["x"])
+            my = int(s_info["y"])
+            mw = int(s_info["width"])
+            mh = int(s_info["height"])
+
+            covers_monitor_bounds = (
+                rc.left <= mx + 2
+                and rc.top <= my + 2
+                and rc.right >= mx + mw - 2
+                and rc.bottom >= my + mh - 2
+            )
+            if covers_monitor_bounds:
+                # Distinguish true fullscreen applications (borderless games, F11 browsers, fullscreen video players)
+                # from standard captioned maximized desktop windows when the taskbar is auto-hidden
+                has_full_caption = ((style & WS_CAPTION) == WS_CAPTION)
+                is_maximized_desktop_win = bool(style & WS_MAXIMIZE) and has_full_caption
+                is_fullscreen_style = (
+                    not is_maximized_desktop_win
+                    and (
+                        not has_full_caption
+                        or (client_w >= mw and client_h >= mh)
+                    )
+                )
+                if is_fullscreen_style:
+                    result[sid] = True
+                    unresolved_screens.pop(sid, None)
+
+        return bool(unresolved_screens)
+
+    cb = WNDENUMPROC(_enum_top_windows)
+    try:
+        user32.EnumWindows(cb, 0)
+    except Exception:
+        pass
+
+    return result
+
+
+def fullscreen_monitor_worker_loop():
+    """
+    Lightweight background daemon that polls connected displays every 0.75s for fullscreen applications
+    on screens where 'Pause during full screen application' ('pausefullscreen') is enabled.
+    Automatically pauses the wallpaper on that display to conserve resources and resumes when fullscreen exits.
+    """
+    while IS_RUNNING:
+        time.sleep(0.75)
+        if not IS_RUNNING or APP_PAUSED:
+            continue
+        try:
+            screens_to_check = []
+            disabled_fs_screens = []
+            for s in list(CONNECTED_SCREENS):
+                sid = s["id"]
+                sc_cfg = get_screen_config(sid)
+                enabled = bool(sc_cfg.get("enabled", False))
+                pause_fs = _normalize_vsync_value(
+                    sc_cfg.get("properties", {}).get("pausefullscreen", {}).get("value", True)
+                )
+                if enabled and pause_fs:
+                    screens_to_check.append(s)
+                else:
+                    disabled_fs_screens.append(sid)
+
+            # Clear fullscreen_paused on any screen where pausefullscreen or screen display was turned off
+            for sid in disabled_fs_screens:
+                changed_clear = False
+                with DATA_LOCK:
+                    st = get_screen_runtime_state(sid)
+                    if st.get("fullscreen_paused", False):
+                        st["fullscreen_paused"] = False
+                        changed_clear = True
+                if changed_clear:
+                    push_pause_states_to_webviews(sid)
+                    if is_screen_enabled(sid) and not is_screen_effectively_paused(sid):
+                        ensure_screen_tag_pool_populated_async(sid, force_reset=False)
+
+            if not screens_to_check:
+                continue
+
+            fs_map = detect_fullscreen_monitors(screens_to_check)
+            for s in screens_to_check:
+                sid = s["id"]
+                is_fs_now = bool(fs_map.get(sid, False))
+                state_changed = False
+                manual_paused = False
+                with DATA_LOCK:
+                    st = get_screen_runtime_state(sid)
+                    prev_fs = bool(st.get("fullscreen_paused", False))
+                    manual_paused = bool(st.get("wallpaper_paused", False))
+                    if prev_fs != is_fs_now:
+                        st["fullscreen_paused"] = is_fs_now
+                        state_changed = True
+
+                if state_changed:
+                    push_pause_states_to_webviews(sid)
+                    if is_fs_now:
+                        log_event(
+                            "perf",
+                            f"Full screen application detected on {sid} — automatically paused wallpaper & background workers to conserve resources.",
+                        )
+                    else:
+                        log_event(
+                            "perf",
+                            f"Full screen application exited on {sid} — automatically resumed wallpaper.",
+                        )
+                        if not manual_paused:
+                            ensure_screen_tag_pool_populated_async(sid, force_reset=False)
+        except Exception:
+            pass
+
+
 def on_webview_started():
     for screen_info in CONNECTED_SCREENS:
         sid = screen_info["id"]
@@ -7248,6 +8443,9 @@ if __name__ == "__main__":
 
     suggestion_thread = threading.Thread(target=suggestion_worker_loop, daemon=True)
     suggestion_thread.start()
+
+    fullscreen_thread = threading.Thread(target=fullscreen_monitor_worker_loop, daemon=True)
+    fullscreen_thread.start()
 
     tray_thread = threading.Thread(target=setup_tray, daemon=True)
     tray_thread.start()
