@@ -8,6 +8,36 @@ All notable changes to the **Danbooru Wallpaper Application** are documented in 
 
 ---
 
+## v2.3.12 — Win32 HDMI Hotplug Hardening, Desktop Icon Scale Protection, Glass-Pane Coexistence & Automatic Desktop Recovery Watchdog
+
+### Summary
+This update fixes a critical Windows 11 24H2+ multi-monitor issue where turning an HDMI TV (third screen) on or off while the wallpaper is running could cause the wallpaper to tile across the screen like Windows Task View, fail to update monitor coordinates, or cause all desktop icons to suddenly grow in size. The application now detects HDMI display connections and disconnections automatically in the background, protects your desktop icon size during high-DPI TV transitions, coexists cleanly with companion desktop overlay tools like Glass-Pane, and adds a one-click **"Resync Displays"** button in both the Settings window and the System Tray menu.
+
+### Add or Changed
+- **Automatic HDMI TV & Display Hotplug Recovery**: Turning an HDMI TV or secondary monitor on or off while the app is running now automatically updates all monitor positions, creates or hides the TV's wallpaper surface as needed, and keeps remaining monitors playing smoothly without restarting the app.
+- **Fixed "Task View" Tiled Viewport Glitch**: Prevented Windows DPI auto-scaling and disconnected TV windows from shrinking or tiling wallpaper viewports across your remaining monitors when displays turn on or off.
+- **Desktop Icon Size Protection**: Prevented Windows Explorer from enlarging your desktop icons when connecting or disconnecting a high-DPI 4K HDMI TV while the wallpaper is attached to the desktop.
+- **Manual "Resync Displays" Button in Settings & System Tray**: Added a **Resync Displays** button next to the **Select Screen** dropdown in the **Display** tab and in the right-click System Tray menu for instant on-demand display and desktop Z-order recovery.
+- **Live Screen Selector Dropdown Refresh**: If the Application Settings window is open when you turn an HDMI TV or monitor on or off, the **Select Screen** dropdown updates automatically.
+- **Glass-Pane & Window Snap Isolation**: Configured wallpaper windows as strictly passive, click-through surfaces so Windows 11 Snap Assist, Task View, and companion utilities such as **Glass-Pane** (`PROGMANVIBE/Glass-Pane`) never snap, resize, or false-pause the wallpaper.
+
+### Removed
+- **Repeated `0x052C` Progman Broadcasts**: Stopped sending repeated `0x052C` initialization messages to `Progman` on every geometry sync once the desktop `WorkerW` layer is already active.
+- **Orphaned Disconnected Monitor Windows**: Stopped leaving disconnected monitors' wallpaper windows visible inside `Progman` when a display is powered off.
+- **Browser Pinch & Ctrl+Wheel Zoom inside Wallpaper Surfaces**: Disabled Chromium pinch-zoom (`--disable-pinch`) and blocked `Ctrl+Wheel` / `Ctrl++/-` zoom shortcuts inside the WebView2 renderer.
+
+### Technical
+- **Root-Cause Fixes (`danbooru_service.py`, `index.html`)**:
+  - **Conditional One-Time `0x052C` Topology Resolution (`_probe_existing_desktop_topology`, `enumerate_desktop_topology`)**: Separated non-destructive `Progman` / `WorkerW` inspection (`_probe_existing_desktop_topology()`) from `0x052C` broadcasting. `0x052C` (`wParam=0, lParam=0` and `wParam=0xD, lParam=0x1`) is now sent only when no valid `WorkerW` exists yet (initial launch or after an `explorer.exe` restart), preventing `explorer.exe` from resetting `SHELLDLL_DefView` icon metrics or detaching sibling `Progman` overlays during runtime syncs.
+  - **Desktop Icon Spacing & View Mode Guard (`find_desktop_listview_hwnd`, `capture_desktop_icon_metrics`, `restore_desktop_icon_metrics_if_inflated`)**: Snapshots baseline `LVM_GETVIEW` and `LVM_GETITEMSPACING` metrics from `SHELLDLL_DefView` -> `SysListView32` before attachment and automatically restores them via `LVM_SETVIEW` and `LVM_SETICONSPACING` if an HDMI TV DPI transition inflates desktop icon spacing.
+  - **Collision-Free Two-Pass Monitor ID Registry (`_KNOWN_DEVICE_TO_SCREEN_ID`, `refresh_connected_screens_preserving_ids`)**: Fixed a bug where connecting a new monitor whose sort order preceded an existing monitor could assign duplicate `screen_id` values (`two "screen_2"` entries). Implemented a persistent `_KNOWN_DEVICE_TO_SCREEN_ID` registry with a two-pass assignment that preserves existing `screen_id` bindings across power-off/on cycles and assigns strictly collision-free `screen_{n}` IDs to newly connected HDMI displays.
+  - **Disconnected Monitor Hiding & `disconnected_paused` State (`sync_all_screens_z_order_and_geometry`, `is_screen_effectively_paused`)**: Fixed a bug where `if not hwnd or sid not in screens_by_id: continue` skipped disconnected monitors' HWNDs when an HDMI TV was powered off, leaving the disconnected TV's `WS_VISIBLE` child window clamped onto remaining monitors inside `Progman`. Disconnected screen HWNDs are now immediately hidden (`~WS_VISIBLE`, `SWP_HIDEWINDOW`) and marked `disconnected_paused = True` to halt their WebView2 render loops and tag-pool workers until reconnected.
+  - **Passive Click-Through Window Styles & Glass-Pane Coexistence (`_apply_passive_wallpaper_window_styles`, `detect_fullscreen_monitors`)**: Applied `user32.EnableWindow(hwnd, False)` (`WS_DISABLED`) and `WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT` to all wallpaper host HWNDs (and disabled hit-testing on child `WindowsForms10.*` / `Chrome_WidgetWin_*` containers), and added `GlassPane` / `Glass-Pane` class and title exclusions to `detect_fullscreen_monitors()`.
+  - **Background Display Hotplug & Self-Healing Watchdog (`get_display_topology_signature`, `resync_all_displays_and_desktop`, `verify_and_heal_desktop_hwnds`, `ensure_webview_windows_for_connected_screens`)**: Extended `fullscreen_monitor_worker_loop()` to poll virtual screen bounds (`SM_XVIRTUALSCREEN`, `SM_YVIRTUALSCREEN`, `SM_CXVIRTUALSCREEN`, `SM_CYVIRTUALSCREEN`) and `EnumDisplayMonitors` every `0.75s` (with a 2-tick EDID/DPI settle debounce), dynamically provisioning `pywebview` windows for newly connected monitors and verifying `GetParent(hwnd)` and `GetWindowRect(hwnd)` every `2.25s` to self-heal WinForms DPI auto-scaling drift.
+  - **Debounced Viewport Resize & Zoom Guard (`index.html`)**: Added `120ms` resize debouncing (`performViewportResizeSync()`) and `window.forceViewportResync()` alongside `wheel` (`e.ctrlKey`) and `keydown` zoom blockers.
+
+---
+
 ## v2.3.11 — Principal Systems, Concurrency, Rendering & Security Audit Fixes (13 Verified Issues Resolved)
 
 ### Summary

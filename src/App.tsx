@@ -34,25 +34,25 @@ const FILE_LIST: { key: FileKey; path: string; label: string; desc: string }[] =
     key: 'danbooru_service.py',
     path: '/updated_files/danbooru_service.py',
     label: 'danbooru_service.py',
-    desc: 'v2.3.11 service incorporating all 11 backend/Win32/security audit fixes: SendMessageTimeoutW WM_SIZE deadlock prevention, /media HTTP Range & Content-Range hardening, host-scoped Basic Auth, targeted multi-monitor Z-order sync, _JS_EVAL_QUEUE (maxlen=128) coalescing, auto-hidden taskbar fullscreen accuracy, multi-GPU PDH LUID bucketing, persistent monitor device IDs, and float slider precision preservation.',
+    desc: 'v2.3.12 service featuring HDMI TV hotplug watchdog & dynamic WebView2 provisioning, non-destructive _probe_existing_desktop_topology (conditional 0x052C), SHELLDLL_DefView desktop icon scale snapshot & restoration, passive WS_DISABLED + WS_EX_TRANSPARENT child styles, disconnected monitor hiding, collision-free persistent monitor IDs, Glass-Pane coexistence, and manual Resync Displays button in Settings & Tray.',
   },
   {
     key: 'index.html',
     path: '/updated_files/index.html',
     label: 'index.html',
-    desc: 'v2.3.11 WebView2 renderer with scratch-canvas downscale generation/pause abort guards in pumpPreloader, scroll-mode artistTags preservation across all 8 activeItems insertion paths, audited Mondrian/Rows tree solvers, and full background process suspension when paused.',
+    desc: 'v2.3.12 WebView2 renderer with explicit pinch/Ctrl+Wheel/Ctrl+Key zoom blockers, 120ms debounced window resize handler (preventing mid-handshake HDMI layout thrashing), window.forceViewportResync() hook, and full pause/solver optimizations.',
   },
   {
     key: 'project.json',
     path: '/updated_files/project.json',
     label: 'project.json',
-    desc: 'v2.3.11 wallpaper configuration schema synchronized 1:1 with get_default_properties_dict(), including per-screen pausefullscreen (bool, default true) and Edge Fill metadata.',
+    desc: 'v2.3.12 wallpaper configuration schema synchronized 1:1 with get_default_properties_dict(), including per-screen pausefullscreen (bool, default true) and Edge Fill metadata.',
   },
   {
     key: 'README.md',
     path: '/updated_files/README.md',
     label: 'README.md',
-    desc: 'Updated README documenting architecture, Mondrian/Row solver optimizations, pause background resource conservation, per-screen fullscreen auto-pause switch, and security hardening.',
+    desc: 'Updated v2.3.12 README documenting Windows 11 24H2+ HDMI hotplug recovery, SHELLDLL_DefView icon scale guard, Glass-Pane coexistence, Resync Displays controls, and security hardening.',
   },
   {
     key: 'GLOSSARY.md',
@@ -64,7 +64,7 @@ const FILE_LIST: { key: FileKey; path: string; label: string; desc: string }[] =
     key: 'CHANGELOG.md',
     path: '/updated_files/CHANGELOG.md',
     label: 'CHANGELOG.md',
-    desc: 'Formalized release notes across all versions (v2.0.0 – v2.3.11), organized consistently into 4 sections per version: Summary, Add or Changed, Removed, and Technical.',
+    desc: 'Formalized release notes across all versions (v2.0.0 – v2.3.12), organized consistently into 4 sections per version: Summary, Add or Changed, Removed, and Technical.',
   },
 ];
 
@@ -267,6 +267,15 @@ const SECURITY_AUDIT_ITEMS = [
 ];
 
 const FEATURE_SUMMARY_ITEMS = [
+  {
+    id: 'AUDIT-HOTPLUG (v2.3.12)',
+    severity: 'CRITICAL WINDOWS 11 24H2+ HDMI TV HOTPLUG, TASK VIEW TILING & DESKTOP ICON INFLATION FIX',
+    file: 'danbooru_service.py & index.html',
+    issue: 'Eliminate "Task View" Tiled Viewport Glitch, Desktop Icon Inflation & Display Topology Desync When Connecting/Disconnecting an HDMI TV at Runtime',
+    cause:
+      'Turning an HDMI TV (3rd monitor) on or off while the wallpaper was running triggered 4 interacting Win32 failures on Windows 11 24H2+: (1) `enumerate_desktop_topology()` unconditionally broadcast `0x052C` (`wParam=0, lParam=0` and `wParam=0xD, lParam=0x1`) to `Progman` on every geometry sync—forcing `explorer.exe` to re-evaluate `SHELLDLL_DefView` (`SysListView32`) icon metrics against the newly connected TV\'s high DPI while `PER_MONITOR_AWARE_V2` (`-4`) child windows were attached inside `Progman`, inflating all desktop icons; (2) `sync_all_screens_z_order_and_geometry()` executed `if not hwnd or sid not in screens_by_id: continue`, skipping disconnected monitors when the TV was powered off and leaving its `WS_VISIBLE` HWND clamped inside `Progman` over remaining monitors like a "Task View" grid; (3) `refresh_connected_screens_preserving_ids()` could assign duplicate `screen_id` values when monitor sort order shifted on hotplug; and (4) `CONNECTED_SCREENS` was never refreshed in the background on `WM_DISPLAYCHANGE`, nor were WinForms `WM_DPICHANGED` child size overrides healed automatically.',
+    fix: 'Implemented 7 comprehensive fixes: (1) Added non-destructive `_probe_existing_desktop_topology(progman)` so `0x052C` is only sent when no valid `WorkerW` exists yet (`force_init=True`), never during routine geometry syncs; (2) Added `capture_desktop_icon_metrics()` and `restore_desktop_icon_metrics_if_inflated()` (`LVM_GETITEMSPACING`, `LVM_SETICONSPACING`, `LVM_GETVIEW`, `LVM_SETVIEW`) to automatically restore `SHELLDLL_DefView` desktop icon spacing if a monitor DPI transition inflates them; (3) Hardened wallpaper HWNDs and Chromium children with `EnableWindow(hwnd, False)` (`WS_DISABLED`) + `WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT` (`_apply_passive_wallpaper_window_styles`) so they cannot intercept mouse wheel, pinch-zoom, or focus; (4) Explicitly hid (`SW_HIDE`) and paused (`disconnected_paused`) any `SCREEN_HWNDS[sid]` whose monitor is turned off; (5) Rebuilt `refresh_connected_screens_preserving_ids()` with a persistent `_KNOWN_DEVICE_TO_SCREEN_ID` map and two-pass collision-free ID allocator; (6) Added automatic hotplug topology detection (`get_display_topology_signature`), dynamic WebView2 provisioning (`ensure_webview_windows_for_connected_screens`), and a 2.25s HWND parent/rect watchdog (`verify_and_heal_desktop_hwnds`) inside `fullscreen_monitor_worker_loop()` plus `Glass-Pane` coexistence exclusions; and (7) Added a manual `"Resync Displays"` button in `SettingsDialog` (Display tab) and the system tray context menu.',
+  },
   {
     id: 'AUDIT-FULL (v2.3.11)',
     severity: '13 VERIFIED PRINCIPAL SYSTEMS, CONCURRENCY, RENDERING & SECURITY AUDIT FIXES',
@@ -921,10 +930,10 @@ export default function App() {
         <div>
           <h1 className="text-base font-bold tracking-tight flex items-center gap-2">
             <LayoutGrid className="w-5 h-5 text-blue-500" />
-            Danbooru Wallpaper Suite v2.3.10 — Solver Optimization, Pause Resource Guard &amp; Fullscreen Auto-Pause
+            Danbooru Wallpaper Suite v2.3.12 — Win11 24H2+ HDMI Hotplug Watchdog, Desktop Icon Guard &amp; Passive Win32 HWNDs
           </h1>
           <p className={`text-xs mt-0.5 ${isDark ? 'text-zinc-400' : 'text-zinc-600'}`}>
-            Optimized Mondrian &amp; Row Tree Solvers • Pause Stops Background Processes • Fullscreen App Auto-Pause Switch • Single-Row Masonry Buttons
+            Conditional 0x052C Probe • SHELLDLL_DefView Icon Scale Guard • Disconnected HDMI TV Auto-Hide • Glass-Pane Coexistence • Resync Displays Button
           </p>
         </div>
 
@@ -1065,19 +1074,19 @@ export default function App() {
             >
               <div className="font-semibold flex items-center gap-1.5 text-emerald-500">
                 <Wrench className="w-3.5 h-3.5" />
-                Verified v2.3.10 Updates
+                Verified v2.3.12 Updates
               </div>
               <div>
-                • <strong>Optimized Solvers</strong>: Bounded LRU subtree memoization, branch-and-bound pruning &amp; O(1) incremental row swap delta math.
+                • <strong>Conditional 0x052C &amp; Icon Guard</strong>: Probes existing <code>WorkerW</code> without rebroadcasting <code>0x052C</code> and restores <code>SHELLDLL_DefView</code> icon metrics if HDMI DPI changes inflate them.
               </div>
               <div>
-                • <strong>Pause Resource Conservation</strong>: Pressing Pause stops tag pool fetches, aborts preloads/decodes, and pauses video &amp; WAAPI.
+                • <strong>Disconnected TV Auto-Hide</strong>: Turning off an HDMI TV immediately hides (<code>SW_HIDE</code>) and pauses its HWND instead of clamping it into a Task View grid.
               </div>
               <div>
-                • <strong>Fullscreen App Auto-Pause</strong>: Per-screen switch on the right side of the enable row pauses wallpaper during fullscreen games/videos.
+                • <strong>Passive Click-Through HWNDs</strong>: Enforces <code>WS_DISABLED</code> + <code>WS_EX_TRANSPARENT</code> + <code>--disable-pinch</code> so wallpaper windows never steal focus or zoom.
               </div>
               <div>
-                • <strong>Masonry Row &amp; Window Height</strong>: Combined <code>Masonry Layout: ...</code> &amp; <code>Edge Fill: ...</code> on one row + 760px window height.
+                • <strong>Hotplug Watchdog &amp; Resync Displays</strong>: Auto-detects 3rd screen hotplugs, coexists with <code>Glass-Pane</code>, and adds a <code>Resync Displays</code> button in Settings &amp; Tray.
               </div>
             </div>
           </aside>
@@ -1203,9 +1212,9 @@ export default function App() {
 
             {/* Display Tab Body */}
             <div className="p-4 space-y-3 text-xs">
-              {/* 1. Select Screen Dropdown */}
-              <div className="flex items-center justify-between gap-4">
-                <label className="font-bold w-48">Select Screen:</label>
+              {/* 1. Select Screen Dropdown + Resync Displays Button */}
+              <div className="flex items-center justify-between gap-2">
+                <label className="font-bold w-44 shrink-0">Select Screen:</label>
                 <select
                   value={simScreen}
                   onChange={(e) => {
@@ -1220,6 +1229,22 @@ export default function App() {
                   <option value="screen_1">Screen 1 (2560x1440 Primary)</option>
                   <option value="screen_2">Screen 2 (1920x1080 Secondary)</option>
                 </select>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSimAutoSearchNotice(
+                      'Resync Displays: Probed Progman/WorkerW (no 0x052C broadcast), verified SHELLDLL_DefView icon spacing, re-anchored active HWNDs, and forced WebView2 viewport resync'
+                    );
+                  }}
+                  title="Re-enumerate connected monitors, restore desktop icon metrics if inflated, and re-sync wallpaper HWNDs"
+                  className={`px-3 py-1.5 border font-bold text-xs cursor-pointer shrink-0 transition-colors ${
+                    isDark
+                      ? 'bg-[#232329] border-[#323238] text-[#f3f3f5] hover:bg-[#2e2e36]'
+                      : 'bg-[#e8e8ed] border-[#b8b8c0] text-[#1c1c1c] hover:bg-[#dcdce2]'
+                  }`}
+                >
+                  Resync Displays
+                </button>
               </div>
 
               {/* 2. Display Wallpaper On/Off Slide Switch (Left) + Pause During Full Screen Application Switch (Right) */}

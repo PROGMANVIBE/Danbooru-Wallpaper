@@ -234,11 +234,19 @@
   <canvas id="freezeOverlayCanvas"></canvas>
 
   <script>
-    // Prevent any accidental drag, context menu, or navigation/download triggers inside WebView2
+    // Prevent any accidental drag, context menu, pinch/wheel zoom, or navigation/download triggers inside WebView2
     window.addEventListener('dragstart', e => e.preventDefault());
     window.addEventListener('drop', e => e.preventDefault());
     window.addEventListener('dragover', e => e.preventDefault());
     window.addEventListener('contextmenu', e => e.preventDefault());
+    window.addEventListener('wheel', e => {
+      if (e.ctrlKey) e.preventDefault();
+    }, { passive: false });
+    window.addEventListener('keydown', e => {
+      if (e.ctrlKey && (e.key === '+' || e.key === '-' || e.key === '=' || e.key === '0')) {
+        e.preventDefault();
+      }
+    });
 
     const stage = document.getElementById('stage');
     const polaroidBaseCanvas = document.getElementById('polaroidBaseCanvas');
@@ -5821,7 +5829,12 @@
     // =========================================================================
     // MAIN ANIMATION LOOP & RESIZE HANDLING
     // =========================================================================
-    window.addEventListener('resize', () => {
+    let _resizeDebounceTimer = null;
+
+    function performViewportResizeSync() {
+      if (!SCREEN_ENABLED || window.innerWidth < 64 || window.innerHeight < 64) {
+        return;
+      }
       if (DISPLAY_MODE === 'scroll') {
         relayoutScrollItems();
       } else if (DISPLAY_MODE === 'slideshow') {
@@ -5841,6 +5854,24 @@
           markCoverageForLandedItem(polaroidItems[i]);
         }
       }
+    }
+
+    window.forceViewportResync = function() {
+      if (_resizeDebounceTimer !== null) {
+        clearTimeout(_resizeDebounceTimer);
+        _resizeDebounceTimer = null;
+      }
+      performViewportResizeSync();
+    };
+
+    window.addEventListener('resize', () => {
+      if (_resizeDebounceTimer !== null) {
+        clearTimeout(_resizeDebounceTimer);
+      }
+      _resizeDebounceTimer = setTimeout(() => {
+        _resizeDebounceTimer = null;
+        performViewportResizeSync();
+      }, 120);
     });
 
     function animate(currentTime) {

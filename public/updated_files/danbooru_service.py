@@ -12,6 +12,7 @@ os.environ.setdefault(
     "--disable-renderer-backgrounding "
     "--disable-backgrounding-occluded-windows "
     "--autoplay-policy=no-user-gesture-required "
+    "--disable-pinch "
     "--mute-audio "
     "--inprivate "
     "--incognito "
@@ -212,6 +213,7 @@ WS_SYSMENU = 0x00080000
 WS_POPUP = 0x80000000
 WS_CHILD = 0x40000000
 WS_VISIBLE = 0x10000000
+WS_DISABLED = 0x08000000
 WS_CLIPSIBLINGS = 0x04000000
 WS_CLIPCHILDREN = 0x02000000
 WS_MAXIMIZE = 0x01000000
@@ -249,6 +251,16 @@ SIZE_RESTORED = 0
 
 SM_CXSCREEN = 0
 SM_CYSCREEN = 1
+SM_XVIRTUALSCREEN = 76
+SM_YVIRTUALSCREEN = 77
+SM_CXVIRTUALSCREEN = 78
+SM_CYVIRTUALSCREEN = 79
+
+LVM_FIRST = 0x1000
+LVM_GETITEMSPACING = LVM_FIRST + 51
+LVM_SETICONSPACING = LVM_FIRST + 53
+LVM_SETVIEW = LVM_FIRST + 142
+LVM_GETVIEW = LVM_FIRST + 143
 
 WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
 MONITORENUMPROC = ctypes.WINFUNCTYPE(
@@ -289,8 +301,17 @@ user32.GetMonitorInfoW.restype = wintypes.BOOL
 user32.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
 user32.GetClassNameW.restype = ctypes.c_int
 
+user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+user32.GetWindowTextW.restype = ctypes.c_int
+
 user32.IsWindowVisible.argtypes = [wintypes.HWND]
 user32.IsWindowVisible.restype = wintypes.BOOL
+
+user32.IsWindow.argtypes = [wintypes.HWND]
+user32.IsWindow.restype = wintypes.BOOL
+
+user32.EnableWindow.argtypes = [wintypes.HWND, wintypes.BOOL]
+user32.EnableWindow.restype = wintypes.BOOL
 
 user32.ScreenToClient.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.POINT)]
 user32.ScreenToClient.restype = wintypes.BOOL
@@ -309,6 +330,9 @@ user32.SendMessageW.restype = wintypes.LPARAM
 
 user32.SetParent.argtypes = [wintypes.HWND, wintypes.HWND]
 user32.SetParent.restype = wintypes.HWND
+
+user32.GetParent.argtypes = [wintypes.HWND]
+user32.GetParent.restype = wintypes.HWND
 
 user32.SetWindowPos.argtypes = [
     wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int,
@@ -372,6 +396,9 @@ def to_signed_long_ptr(val32) -> LONG_PTR:
 
 
 INJECTION_LOCK = threading.Lock()
+_KNOWN_DEVICE_TO_SCREEN_ID = {}
+_LAST_INITIALIZED_PROGMAN_HWND = None
+_BASELINE_DESKTOP_ICON_METRICS = None
 
 
 def enumerate_connected_monitors():
@@ -430,25 +457,55 @@ def enumerate_connected_monitors():
     return screens
 
 
+def get_display_topology_signature():
+    """
+    Computes a lightweight, deterministic fingerprint of the current Windows Virtual Screen
+    and all active physical monitors so HDMI TV hotplugs, resolution changes, or DPI coordinate
+    shifts are detected immediately in the background.
+    """
+    vx = int(user32.GetSystemMetrics(SM_XVIRTUALSCREEN))
+    vy = int(user32.GetSystemMetrics(SM_YVIRTUALSCREEN))
+    vw = int(user32.GetSystemMetrics(SM_CXVIRTUALSCREEN))
+    vh = int(user32.GetSystemMetrics(SM_CYVIRTUALSCREEN))
+    monitors = enumerate_connected_monitors()
+    mon_sig = tuple(
+        (m.get("device", ""), int(m["x"]), int(m["y"]), int(m["width"]), int(m["height"]), bool(m["is_primary"]))
+        for m in monitors
+    )
+    return (vx, vy, vw, vh, mon_sig)
+
+
 def refresh_connected_screens_preserving_ids():
     """
     Refreshes CONNECTED_SCREENS while preserving existing screen_id assignments
-    for monitors matched by Win32 device name (or coordinates) so active WEBVIEW_WINDOWS
-    and DESKTOP_HWNDS mappings never go out of sync at runtime.
+    across HDMI hotplugs (power-on / power-off cycles) via a two-pass device-name
+    registry so newly connected displays never collide with existing screen_ids.
     """
     global CONNECTED_SCREENS
     fresh = enumerate_connected_monitors()
-    if not CONNECTED_SCREENS:
+
+    for s in (CONNECTED_SCREENS or []):
+        dev = s.get("device")
+        sid = s.get("id")
+        if dev and sid:
+            _KNOWN_DEVICE_TO_SCREEN_ID[dev] = sid
+
+    if not _KNOWN_DEVICE_TO_SCREEN_ID:
+        for m in fresh:
+            dev = m.get("device")
+            if dev:
+                _KNOWN_DEVICE_TO_SCREEN_ID[dev] = m["id"]
         CONNECTED_SCREENS = fresh
         return CONNECTED_SCREENS
 
-    old_by_device = {s.get("device"): s["id"] for s in CONNECTED_SCREENS if s.get("device")}
     used_ids = set()
+    unmatched = []
     updated = []
 
+    # Pass 1: Assign preserved screen_ids to all known monitor devices
     for m in fresh:
         dev = m.get("device")
-        matched_id = old_by_device.get(dev) if dev else None
+        matched_id = _KNOWN_DEVICE_TO_SCREEN_ID.get(dev) if dev else None
         if matched_id and matched_id not in used_ids:
             used_ids.add(matched_id)
             idx_num = int(matched_id.split("_")[-1]) if matched_id.split("_")[-1].isdigit() else m["index"]
@@ -457,11 +514,158 @@ def refresh_connected_screens_preserving_ids():
             m["index"] = idx_num
             m["name"] = f"Screen {idx_num}"
             m["label"] = f"Screen {idx_num}: {m['width']}x{m['height']}{primary_tag}"
+            updated.append(m)
+        else:
+            unmatched.append(m)
+
+    # Pass 2: Assign strictly collision-free screen_ids to newly connected monitors (e.g., HDMI TV turning on)
+    reserved_ids = set(used_ids) | set(_KNOWN_DEVICE_TO_SCREEN_ID.values())
+    for m in unmatched:
+        next_idx = 1
+        while f"screen_{next_idx}" in reserved_ids:
+            next_idx += 1
+        new_id = f"screen_{next_idx}"
+        reserved_ids.add(new_id)
+        used_ids.add(new_id)
+        dev = m.get("device")
+        if dev:
+            _KNOWN_DEVICE_TO_SCREEN_ID[dev] = new_id
+        primary_tag = " (Primary)" if m["is_primary"] else ""
+        m["id"] = new_id
+        m["index"] = next_idx
+        m["name"] = f"Screen {next_idx}"
+        m["label"] = f"Screen {next_idx}: {m['width']}x{m['height']}{primary_tag}"
         updated.append(m)
 
     updated.sort(key=lambda s: s["index"])
     CONNECTED_SCREENS = updated
     return CONNECTED_SCREENS
+
+
+def find_desktop_listview_hwnd(progman=None):
+    """Locates (SHELLDLL_DefView, SysListView32) across Windows 11 24H2+ Progman and Classic WorkerW."""
+    if not progman:
+        progman = user32.FindWindowW("Progman", None)
+    if progman:
+        shell_view = user32.FindWindowExW(progman, 0, "SHELLDLL_DefView", None)
+        if shell_view:
+            listview = user32.FindWindowExW(shell_view, 0, "SysListView32", None)
+            return shell_view, listview
+
+    found = [0, 0]
+
+    def _enum_proc(top_hwnd, lparam):
+        sv = user32.FindWindowExW(top_hwnd, 0, "SHELLDLL_DefView", None)
+        if sv:
+            lv = user32.FindWindowExW(sv, 0, "SysListView32", None)
+            found[0] = sv
+            found[1] = lv
+            return False
+        return True
+
+    cb = WNDENUMPROC(_enum_proc)
+    try:
+        user32.EnumWindows(cb, 0)
+    except Exception:
+        pass
+    return found[0], found[1]
+
+
+def capture_desktop_icon_metrics(progman=None):
+    """
+    Snapshots the user's current desktop icon view mode (LVM_GETVIEW) and icon cell spacing
+    (LVM_GETITEMSPACING) from Explorer's SysListView32 before desktop topology initialization.
+    """
+    global _BASELINE_DESKTOP_ICON_METRICS
+    _, listview = find_desktop_listview_hwnd(progman)
+    if not listview or not user32.IsWindow(listview):
+        return _BASELINE_DESKTOP_ICON_METRICS
+
+    view_res = ctypes.c_size_t(0)
+    spacing_large = ctypes.c_size_t(0)
+    spacing_small = ctypes.c_size_t(0)
+
+    ok1 = user32.SendMessageTimeoutW(
+        listview, LVM_GETVIEW, 0, 0, SMTO_NORMAL, 150, ctypes.byref(view_res)
+    )
+    ok2 = user32.SendMessageTimeoutW(
+        listview, LVM_GETITEMSPACING, 0, 0, SMTO_NORMAL, 150, ctypes.byref(spacing_large)
+    )
+    user32.SendMessageTimeoutW(
+        listview, LVM_GETITEMSPACING, 1, 0, SMTO_NORMAL, 150, ctypes.byref(spacing_small)
+    )
+    if ok1 and ok2 and spacing_large.value > 0:
+        cx = int(spacing_large.value) & 0xFFFF
+        cy = (int(spacing_large.value) >> 16) & 0xFFFF
+        if 32 <= cx <= 512 and 32 <= cy <= 512:
+            metrics = {
+                "listview_hwnd": int(listview),
+                "view_mode": int(view_res.value),
+                "spacing_large": int(spacing_large.value),
+                "spacing_small": int(spacing_small.value),
+                "cx": cx,
+                "cy": cy,
+            }
+            if _BASELINE_DESKTOP_ICON_METRICS is None:
+                _BASELINE_DESKTOP_ICON_METRICS = metrics
+            return metrics
+    return _BASELINE_DESKTOP_ICON_METRICS
+
+
+def restore_desktop_icon_metrics_if_inflated(progman=None):
+    """
+    Checks whether an HDMI hotplug / DPI transition caused Explorer's SHELLDLL_DefView
+    to inflate desktop icon spacing or view mode, and restores the baseline metrics if altered.
+    """
+    if not _BASELINE_DESKTOP_ICON_METRICS:
+        return False
+    _, listview = find_desktop_listview_hwnd(progman)
+    if not listview or not user32.IsWindow(listview):
+        return False
+
+    cur_view = ctypes.c_size_t(0)
+    cur_spacing = ctypes.c_size_t(0)
+    ok1 = user32.SendMessageTimeoutW(
+        listview, LVM_GETVIEW, 0, 0, SMTO_NORMAL, 150, ctypes.byref(cur_view)
+    )
+    ok2 = user32.SendMessageTimeoutW(
+        listview, LVM_GETITEMSPACING, 0, 0, SMTO_NORMAL, 150, ctypes.byref(cur_spacing)
+    )
+    if not (ok1 and ok2 and cur_spacing.value > 0):
+        return False
+
+    cur_cx = int(cur_spacing.value) & 0xFFFF
+    cur_cy = (int(cur_spacing.value) >> 16) & 0xFFFF
+    base_cx = _BASELINE_DESKTOP_ICON_METRICS["cx"]
+    base_cy = _BASELINE_DESKTOP_ICON_METRICS["cy"]
+    base_view = _BASELINE_DESKTOP_ICON_METRICS["view_mode"]
+    base_spacing = _BASELINE_DESKTOP_ICON_METRICS["spacing_large"]
+
+    # Detect unintended icon inflation (>4px spacing jump or view mode switch triggered by HDMI DPI change)
+    if abs(cur_cx - base_cx) > 4 or abs(cur_cy - base_cy) > 4 or int(cur_view.value) != base_view:
+        dummy = ctypes.c_size_t(0)
+        if int(cur_view.value) != base_view:
+            user32.SendMessageTimeoutW(
+                listview, LVM_SETVIEW, base_view, 0, SMTO_NORMAL, 150, ctypes.byref(dummy)
+            )
+        user32.SendMessageTimeoutW(
+            listview,
+            LVM_SETICONSPACING,
+            0,
+            to_signed_long_ptr(base_spacing),
+            SMTO_NORMAL,
+            150,
+            ctypes.byref(dummy),
+        )
+        user32.RedrawWindow(
+            listview, None, None, RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_FRAME
+        )
+        log_event(
+            "win32",
+            f"Restored desktop icon metrics after display DPI transition (spacing {cur_cx}x{cur_cy} -> {base_cx}x{base_cy}).",
+        )
+        return True
+    return False
 
 
 def has_webview_render_child(hwnd):
@@ -502,16 +706,12 @@ def get_webview_hwnd(window, window_title):
     return None
 
 
-def enumerate_desktop_topology(progman):
+def _probe_existing_desktop_topology(progman):
     """
-    Sends 0x052C to Progman and resolves the desktop window topology across
-    Windows 10, Windows 11 (21H2-23H2), and Windows 11 24H2+.
+    Non-destructively inspects Progman and WorkerW without sending 0x052C so active
+    Windows 11 24H2+ child attachments, SHELLDLL_DefView icon metrics, and sibling
+    overlays (such as Glass-Pane) are never reset during routine geometry syncs.
     """
-    result = ctypes.c_size_t(0)
-    user32.SendMessageTimeoutW(progman, 0x052C, 0, 0, SMTO_NORMAL, 1000, ctypes.byref(result))
-    user32.SendMessageTimeoutW(progman, 0x052C, 0xD, 0x1, SMTO_NORMAL, 1000, ctypes.byref(result))
-    time.sleep(0.05)
-
     progman_ex = GetWindowLongPtrW(progman, GWL_EXSTYLE) & 0xFFFFFFFF
     is_noref_bitmap = bool(progman_ex & WS_EX_NOREDIRECTIONBITMAP)
 
@@ -539,17 +739,85 @@ def enumerate_desktop_topology(progman):
         and not classic_workerw
     )
 
+    has_valid_workerw = bool(workerw_in_progman) or bool(classic_workerw)
+
     return {
         "is_win11_24h2": is_win11_24h2,
         "shell_view_in_progman": shell_view_in_progman,
         "workerw_in_progman": workerw_in_progman,
         "classic_workerw": classic_workerw[0] if classic_workerw else None,
+        "has_valid_workerw": has_valid_workerw,
     }
+
+
+def enumerate_desktop_topology(progman, force_init=False):
+    """
+    Resolves the desktop window topology across Windows 10, Windows 11 (21H2-23H2),
+    and Windows 11 24H2+. Sends 0x052C to Progman ONLY when WorkerW has not been
+    spawned yet (initial startup or after an explorer.exe restart), preventing
+    SHELLDLL_DefView desktop icon inflation and sibling overlay disruption.
+    """
+    global _LAST_INITIALIZED_PROGMAN_HWND
+    capture_desktop_icon_metrics(progman)
+
+    topo = _probe_existing_desktop_topology(progman)
+    needs_052c = (
+        force_init
+        or not topo["has_valid_workerw"]
+        or (_LAST_INITIALIZED_PROGMAN_HWND != int(progman))
+    )
+
+    if needs_052c:
+        # Only send 0x052C if WorkerW truly does not exist yet or force_init was requested
+        if not topo["has_valid_workerw"] or force_init:
+            result = ctypes.c_size_t(0)
+            user32.SendMessageTimeoutW(progman, 0x052C, 0, 0, SMTO_NORMAL, 1000, ctypes.byref(result))
+            user32.SendMessageTimeoutW(progman, 0x052C, 0xD, 0x1, SMTO_NORMAL, 1000, ctypes.byref(result))
+            time.sleep(0.05)
+            topo = _probe_existing_desktop_topology(progman)
+        _LAST_INITIALIZED_PROGMAN_HWND = int(progman)
+        restore_desktop_icon_metrics_if_inflated(progman)
+
+    return topo
+
+
+def _apply_passive_wallpaper_window_styles(hwnd, is_win11_24h2: bool):
+    """
+    Configures the wallpaper host HWND as a strictly passive, disabled, click-through child surface
+    (WS_CHILD | WS_DISABLED + WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT) so Windows 11
+    Snap Assist / Task View, Glass-Pane hooks, and mouse-wheel DPI zoom events completely ignore it.
+    """
+    user32.EnableWindow(hwnd, False)
+    style = GetWindowLongPtrW(hwnd, GWL_STYLE) & 0xFFFFFFFF
+    clear_mask = WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_SYSMENU | WS_POPUP
+    style = (style & ~clear_mask) | WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN | WS_DISABLED
+    SetWindowLongPtrW(hwnd, GWL_STYLE, to_signed_long_ptr(style))
+
+    ex_style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & 0xFFFFFFFF
+    if is_win11_24h2:
+        ex_style = (
+            (ex_style & ~WS_EX_APPWINDOW)
+            | WS_EX_TOOLWINDOW
+            | WS_EX_NOACTIVATE
+            | WS_EX_LAYERED
+            | WS_EX_TRANSPARENT
+        )
+        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, to_signed_long_ptr(ex_style))
+        user32.SetLayeredWindowAttributes(hwnd, 0, 255, LWA_ALPHA)
+    else:
+        ex_style = (
+            (ex_style & ~(WS_EX_APPWINDOW | WS_EX_LAYERED))
+            | WS_EX_TOOLWINDOW
+            | WS_EX_NOACTIVATE
+            | WS_EX_TRANSPARENT
+        )
+        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, to_signed_long_ptr(ex_style))
 
 
 def resize_webview_child_containers(hwnd, screen_w, screen_h):
     """
-    Forces all inner WinForms and Chromium host controls to fill (0, 0, screen_w, screen_h).
+    Forces all inner WinForms and Chromium host controls to fill (0, 0, screen_w, screen_h)
+    and disables direct hit-testing on child containers so wheel/gesture events never leak.
     """
     safe_w = max(1, int(screen_w)) & 0xFFFF
     safe_h = max(1, int(screen_h)) & 0xFFFF
@@ -573,6 +841,7 @@ def resize_webview_child_containers(hwnd, screen_w, screen_h):
                 or cname == "Chrome_RenderWidgetHostHWND"
                 or cname == "Intermediate D3D Window"
             ):
+                user32.EnableWindow(child_hwnd, False)
                 user32.SetWindowPos(
                     child_hwnd, 0, 0, 0, screen_w, screen_h,
                     SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED | SWP_ASYNCWINDOWPOS
@@ -587,16 +856,20 @@ def resize_webview_child_containers(hwnd, screen_w, screen_h):
     user32.EnumChildWindows(hwnd, child_cb, 0)
 
 
-def sync_all_screens_z_order_and_geometry(target_screen_id=None):
+def sync_all_screens_z_order_and_geometry(target_screen_id=None, force_reattach=False):
     """
-    Synchronizes geometry, visibility, and desktop Z-order across ALL attached monitor HWNDs.
-    Uses SWP_ASYNCWINDOWPOS to prevent cross-thread Win32 GUI deadlocks between Tkinter and WebView2.
+    Synchronizes geometry, parent attachment, visibility, and desktop Z-order across ALL monitor HWNDs.
+    - Hides and pauses HWNDs belonging to disconnected monitors (e.g. when an HDMI TV is turned off)
+      so they never ghost onto remaining displays as Task View-like tiles.
+    - Verifies GetParent(hwnd) and GetWindowRect(hwnd) to automatically heal WinForms DPI auto-scaling
+      or Explorer reparenting after HDMI hotplug events.
     """
+    disconnected_pause_updates = []
     with INJECTION_LOCK:
         progman = user32.FindWindowW("Progman", None)
         if not progman:
             return
-        topo = enumerate_desktop_topology(progman)
+        topo = enumerate_desktop_topology(progman, force_init=False)
         target_parent = (
             progman
             if topo["is_win11_24h2"]
@@ -611,21 +884,71 @@ def sync_all_screens_z_order_and_geometry(target_screen_id=None):
         screens_by_id = {s["id"]: s for s in CONNECTED_SCREENS}
 
         for sid, hwnd in list(DESKTOP_HWNDS.items()):
-            if not hwnd or sid not in screens_by_id:
+            if not hwnd or not user32.IsWindow(hwnd):
+                DESKTOP_HWNDS.pop(sid, None)
+                DESKTOP_INJECTED_SET.discard(sid)
                 continue
 
+            # If this screen is currently disconnected (e.g. HDMI TV turned off), hide its HWND immediately
+            # and mark it disconnected_paused so it cannot render over remaining monitors.
+            if sid not in screens_by_id:
+                style = GetWindowLongPtrW(hwnd, GWL_STYLE) & 0xFFFFFFFF
+                if style & WS_VISIBLE:
+                    style &= ~WS_VISIBLE
+                    SetWindowLongPtrW(hwnd, GWL_STYLE, to_signed_long_ptr(style))
+                user32.SetWindowPos(
+                    hwnd, 0, -32000, -32000, 1, 1,
+                    SWP_NOZORDER | SWP_NOACTIVATE | SWP_HIDEWINDOW | SWP_ASYNCWINDOWPOS
+                )
+                disconnected_pause_updates.append((sid, True))
+                continue
+
+            disconnected_pause_updates.append((sid, False))
             s_info = screens_by_id[sid]
             sc_cfg = get_screen_config(sid)
             enabled = sc_cfg["enabled"]
 
             screen_w = s_info["width"]
             screen_h = s_info["height"]
+
+            current_parent = user32.GetParent(hwnd)
+            style = GetWindowLongPtrW(hwnd, GWL_STYLE) & 0xFFFFFFFF
+            parent_drifted = (
+                force_reattach
+                or (current_parent != target_parent)
+                or not bool(style & WS_CHILD)
+                or bool(style & WS_POPUP)
+            )
+            if parent_drifted:
+                _apply_passive_wallpaper_window_styles(hwnd, topo["is_win11_24h2"])
+                user32.SetParent(hwnd, target_parent)
+                style = GetWindowLongPtrW(hwnd, GWL_STYLE) & 0xFFFFFFFF
+
             pt = wintypes.POINT(s_info["x"], s_info["y"])
             user32.ScreenToClient(target_parent, ctypes.byref(pt))
 
-            style = GetWindowLongPtrW(hwnd, GWL_STYLE) & 0xFFFFFFFF
             was_visible = bool(style & WS_VISIBLE)
-            is_target = (target_screen_id is None or target_screen_id == sid or not was_visible)
+            rect_drifted = False
+            if enabled and was_visible:
+                rc = wintypes.RECT()
+                if user32.GetWindowRect(hwnd, ctypes.byref(rc)):
+                    cur_w = rc.right - rc.left
+                    cur_h = rc.bottom - rc.top
+                    if (
+                        abs(rc.left - s_info["x"]) > 2
+                        or abs(rc.top - s_info["y"]) > 2
+                        or abs(cur_w - screen_w) > 2
+                        or abs(cur_h - screen_h) > 2
+                    ):
+                        rect_drifted = True
+
+            is_target = (
+                target_screen_id is None
+                or target_screen_id == sid
+                or not was_visible
+                or parent_drifted
+                or rect_drifted
+            )
             if enabled:
                 if not was_visible:
                     style |= WS_VISIBLE
@@ -667,6 +990,21 @@ def sync_all_screens_z_order_and_geometry(target_screen_id=None):
                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS
             )
 
+        restore_desktop_icon_metrics_if_inflated(progman)
+
+    # Synchronize disconnected_paused runtime state outside INJECTION_LOCK to preserve lock hierarchy
+    for sid, is_disc in disconnected_pause_updates:
+        changed = False
+        with DATA_LOCK:
+            st = get_screen_runtime_state(sid)
+            if bool(st.get("disconnected_paused", False)) != is_disc:
+                st["disconnected_paused"] = is_disc
+                changed = True
+        if changed:
+            push_pause_states_to_webviews(sid)
+            if not is_disc and is_screen_enabled(sid) and not is_screen_effectively_paused(sid):
+                ensure_screen_tag_pool_populated_async(sid, force_reset=False)
+
 
 def attach_window_to_desktop(window, window_title, mon_x=0, mon_y=0, mon_w=None, mon_h=None):
     """
@@ -689,22 +1027,13 @@ def attach_window_to_desktop(window, window_title, mon_x=0, mon_y=0, mon_w=None,
             log_event("win32", "Failed to locate Progman window.")
             return None
 
-        topo = enumerate_desktop_topology(progman)
+        topo = enumerate_desktop_topology(progman, force_init=False)
         screen_w = mon_w if mon_w is not None else user32.GetSystemMetrics(SM_CXSCREEN)
         screen_h = mon_h if mon_h is not None else user32.GetSystemMetrics(SM_CYSCREEN)
 
-        style = GetWindowLongPtrW(hwnd, GWL_STYLE) & 0xFFFFFFFF
-        clear_mask = WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_SYSMENU | WS_POPUP
-        style = (style & ~clear_mask) | WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN
-        SetWindowLongPtrW(hwnd, GWL_STYLE, to_signed_long_ptr(style))
-
-        ex_style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & 0xFFFFFFFF
+        _apply_passive_wallpaper_window_styles(hwnd, topo["is_win11_24h2"])
 
         if topo["is_win11_24h2"]:
-            ex_style = (ex_style & ~WS_EX_APPWINDOW) | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED
-            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, to_signed_long_ptr(ex_style))
-            user32.SetLayeredWindowAttributes(hwnd, 0, 255, LWA_ALPHA)
-
             target_parent = progman
             user32.SetParent(hwnd, target_parent)
 
@@ -735,9 +1064,6 @@ def attach_window_to_desktop(window, window_title, mon_x=0, mon_y=0, mon_w=None,
                 f"at ({pt.x},{pt.y}) {screen_w}x{screen_h}"
             )
         else:
-            ex_style = (ex_style & ~(WS_EX_APPWINDOW | WS_EX_LAYERED)) | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE
-            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, to_signed_long_ptr(ex_style))
-
             target_parent = topo["classic_workerw"] or topo["workerw_in_progman"] or progman
             user32.SetParent(hwnd, target_parent)
 
@@ -763,6 +1089,7 @@ def attach_window_to_desktop(window, window_title, mon_x=0, mon_y=0, mon_w=None,
             hwnd, None, None,
             RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN | RDW_FRAME
         )
+        restore_desktop_icon_metrics_if_inflated(progman)
         return hwnd
 
 
@@ -2370,6 +2697,7 @@ def get_screen_runtime_state(screen_id: str) -> dict:
             "epoch": 1,
             "wallpaper_paused": False,
             "fullscreen_paused": False,
+            "disconnected_paused": False,
             "nav_seq": 0,
             "nav_action": "",
             "last_nav_time": 0.0,
@@ -2383,12 +2711,16 @@ def get_screen_runtime_state(screen_id: str) -> dict:
 
 
 def is_screen_effectively_paused(screen_id: str) -> bool:
-    """Returns True if the application is globally paused or the specified screen is paused (manually or via fullscreen app)."""
+    """Returns True if the application is globally paused or the specified screen is paused (manually, fullscreen, or disconnected)."""
     if APP_PAUSED:
         return True
     with DATA_LOCK:
         st = get_screen_runtime_state(screen_id)
-        return bool(st.get("wallpaper_paused", False) or st.get("fullscreen_paused", False))
+        return bool(
+            st.get("wallpaper_paused", False)
+            or st.get("fullscreen_paused", False)
+            or st.get("disconnected_paused", False)
+        )
 
 
 def get_or_create_tag_pool_locked(raw_tags: str) -> tuple[str, dict]:
@@ -2583,7 +2915,7 @@ def push_properties_to_webview(target_screen_id=None, sync_geometry=False):
 
 
 def push_pause_states_to_webviews(target_screen_id=None):
-    """Immediately synchronizes master APP_PAUSED and effective per-screen pause state (manual or fullscreen) to target or all screens."""
+    """Immediately synchronizes master APP_PAUSED and effective per-screen pause state (manual, fullscreen, or disconnected) to target or all screens."""
     app_p = "true" if APP_PAUSED else "false"
     target_items = (
         [(target_screen_id, WEBVIEW_WINDOWS.get(target_screen_id))]
@@ -2595,7 +2927,11 @@ def push_pause_states_to_webviews(target_screen_id=None):
             continue
         with DATA_LOCK:
             st = get_screen_runtime_state(sid)
-            wp_paused = bool(st.get("wallpaper_paused", False) or st.get("fullscreen_paused", False))
+            wp_paused = bool(
+                st.get("wallpaper_paused", False)
+                or st.get("fullscreen_paused", False)
+                or st.get("disconnected_paused", False)
+            )
         wp_p = "true" if wp_paused else "false"
         js_code = f"if (window.applyPauseStates) {{ window.applyPauseStates({app_p}, {wp_p}); }}"
         _async_evaluate_js(win, js_code)
@@ -3324,7 +3660,11 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 sc_cfg = get_screen_config(screen_id)
                 with DATA_LOCK:
                     st = get_screen_runtime_state(screen_id)
-                    wp_paused = bool(st.get("wallpaper_paused", False) or st.get("fullscreen_paused", False))
+                    wp_paused = bool(
+                        st.get("wallpaper_paused", False)
+                        or st.get("fullscreen_paused", False)
+                        or st.get("disconnected_paused", False)
+                    )
                 payload = {
                     "enabled": sc_cfg["enabled"],
                     "properties": sc_cfg["properties"],
@@ -3356,7 +3696,11 @@ class ProxyHandler(BaseHTTPRequestHandler):
                     LAST_EPOCH_LOG_TIME = now
 
                 st = get_screen_runtime_state(screen_id)
-                effective_wp_paused = bool(st.get("wallpaper_paused", False) or st.get("fullscreen_paused", False))
+                effective_wp_paused = bool(
+                    st.get("wallpaper_paused", False)
+                    or st.get("fullscreen_paused", False)
+                    or st.get("disconnected_paused", False)
+                )
                 EPOCH_POLL_COUNT += 1
                 res_body = json.dumps({
                     "epoch": st["epoch"],
@@ -5408,7 +5752,7 @@ class SettingsDialog(tk.Toplevel):
         else:
             _RUNTIME_LAST_SELECTED_SCREEN_ID = self.screen_map.get(initial_screen_label, "screen_1")
 
-        # 1. Screen Selector Dropdown
+        # 1. Screen Selector Dropdown + Resync Displays Action
         screen_row = tk.Frame(pad_frame, bg=self.bg_base)
         screen_row.pack(fill="x", pady=2)
         self._themed_frames.append(screen_row)
@@ -5419,6 +5763,24 @@ class SettingsDialog(tk.Toplevel):
         )
         scr_lbl.pack(side="left")
         self._themed_labels_dark.append(scr_lbl)
+
+        self.resync_displays_btn = tk.Button(
+            screen_row,
+            text="Resync Displays",
+            fg=self.text_dark,
+            bg=THEME_PALETTES[CURRENT_THEME]["btn_bg"],
+            activebackground=THEME_PALETTES[CURRENT_THEME]["btn_active"],
+            activeforeground=self.text_dark,
+            font=("Segoe UI", 8, "bold"),
+            bd=0,
+            relief="flat",
+            padx=10,
+            pady=3,
+            cursor="hand2",
+            command=self._on_resync_displays_clicked,
+        )
+        self.resync_displays_btn.pack(side="right", padx=(6, 0))
+        self._themed_neutral_btns.append(self.resync_displays_btn)
 
         self.selected_screen_label = tk.StringVar(self, value=initial_screen_label)
         self.screen_combo = ttk.Combobox(
@@ -7406,6 +7768,39 @@ class SettingsDialog(tk.Toplevel):
         lbl = self.selected_screen_label.get()
         return self.screen_map.get(lbl, "screen_1")
 
+    def refresh_screen_selector_from_topology(self):
+        """
+        Live-updates the Select Screen combobox when an HDMI TV or display is connected
+        or disconnected while the Settings window is open.
+        """
+        global CONNECTED_SCREENS, _RUNTIME_LAST_SELECTED_SCREEN_ID
+        if not self.is_open or not hasattr(self, "screen_combo"):
+            return
+        prev_sid = self._get_current_selected_screen_id()
+        self.screen_map = {s["label"]: s["id"] for s in CONNECTED_SCREENS}
+        id_to_label = {s["id"]: s["label"] for s in CONNECTED_SCREENS}
+        screen_labels = [s["label"] for s in CONNECTED_SCREENS]
+        if not screen_labels:
+            return
+        self.screen_combo.configure(values=screen_labels)
+        if prev_sid in id_to_label:
+            self.selected_screen_label.set(id_to_label[prev_sid])
+            _RUNTIME_LAST_SELECTED_SCREEN_ID = prev_sid
+        else:
+            new_label = screen_labels[0]
+            new_sid = self.screen_map.get(new_label, "screen_1")
+            self.selected_screen_label.set(new_label)
+            _RUNTIME_LAST_SELECTED_SCREEN_ID = new_sid
+            self._load_screen_values_into_form(new_sid)
+
+    def _on_resync_displays_clicked(self):
+        self._defocus_tag_input_on_outside_click()
+        threading.Thread(
+            target=resync_all_displays_and_desktop,
+            kwargs={"reason": "Manual Resync Displays button in Settings"},
+            daemon=True,
+        ).start()
+
     def _on_screen_selection_changed(self, event=None):
         global _RUNTIME_LAST_SELECTED_SCREEN_ID
         self._cancel_auto_tag_refresh_timer()
@@ -8092,6 +8487,15 @@ def on_tray_settings(icon=None, item=None):
         TK_ROOT.after(0, open_settings_dialog_window)
 
 
+def on_tray_resync_displays(icon=None, item=None):
+    """Triggers a non-destructive multi-monitor topology & desktop Z-order recovery from the system tray."""
+    threading.Thread(
+        target=resync_all_displays_and_desktop,
+        kwargs={"reason": "Manual Resync Displays from System Tray"},
+        daemon=True,
+    ).start()
+
+
 def shutdown_app(icon=None, item=None):
     global IS_RUNNING
     if not IS_RUNNING:
@@ -8134,12 +8538,13 @@ def setup_tray():
     """
     Configures the system tray icon:
     - Left-click (default=True) immediately opens the Application Settings window.
-    - Right-click opens the context menu with Settings and Exit.
+    - Right-click opens the context menu with Settings, Resync Displays, and Exit.
     """
     global TRAY_ICON
     box_icon = create_cardboard_box_icon()
     menu = pystray.Menu(
         pystray.MenuItem("Settings", on_tray_settings, default=True),
+        pystray.MenuItem("Resync Displays", on_tray_resync_displays),
         pystray.Menu.SEPARATOR,
         pystray.MenuItem("Exit", shutdown_app),
     )
@@ -8209,6 +8614,155 @@ def inject_and_sync_screen(screen_info, window, win_title):
     push_pause_states_to_webviews(sid)
 
 
+def ensure_webview_windows_for_connected_screens():
+    """
+    Dynamically creates and injects pywebview windows for any newly connected monitors
+    (e.g., when an HDMI TV is powered on after the application has already started).
+    """
+    for screen_info in list(CONNECTED_SCREENS):
+        sid = screen_info["id"]
+        win = WEBVIEW_WINDOWS.get(sid)
+        win_title = f"{WEBVIEW_WINDOW_TITLE_PREFIX}_{sid}"
+        if win is None:
+            try:
+                log_event(
+                    "win32",
+                    f"Creating WebView2 wallpaper surface for newly connected {screen_info['label']} ({sid}).",
+                )
+                win = webview.create_window(
+                    title=win_title,
+                    url=f"http://127.0.0.1:{PORT}/?screen={sid}",
+                    x=screen_info["x"],
+                    y=screen_info["y"],
+                    width=screen_info["width"],
+                    height=screen_info["height"],
+                    frameless=True,
+                    easy_drag=False,
+                    background_color="#0b0b0d",
+                )
+                WEBVIEW_WINDOWS[sid] = win
+                win.events.loaded += (
+                    lambda s=screen_info, w=win, t=win_title: threading.Thread(
+                        target=inject_and_sync_screen, args=(s, w, t), daemon=True
+                    ).start()
+                )
+            except Exception as e:
+                log_event("win32", f"Failed to create hotplug WebView2 window for {sid}: {e}")
+        elif sid not in DESKTOP_INJECTED_SET:
+            threading.Thread(
+                target=inject_and_sync_screen, args=(screen_info, win, win_title), daemon=True
+            ).start()
+
+
+def resync_all_displays_and_desktop(reason: str = "Display topology change"):
+    """
+    Non-destructively re-enumerates connected monitors, provisions any newly connected HDMI displays,
+    hides disconnected displays, repairs parent/style/rect drift inside Progman/WorkerW, restores
+    desktop icon metrics if perturbed by DPI switches, and updates the Settings dropdown live.
+    """
+    try:
+        screens = refresh_connected_screens_preserving_ids()
+        summary = ", ".join(f"{s['id']}={s['width']}x{s['height']}@({s['x']},{s['y']})" for s in screens)
+        log_event("win32", f"{reason}: Synchronizing {len(screens)} active display(s) [{summary}].")
+
+        ensure_webview_windows_for_connected_screens()
+        sync_all_screens_z_order_and_geometry(target_screen_id=None, force_reattach=True)
+
+        for s in list(screens):
+            sid = s["id"]
+            win = WEBVIEW_WINDOWS.get(sid)
+            if win:
+                push_properties_to_webview(sid, sync_geometry=False)
+                push_pause_states_to_webviews(sid)
+                _async_evaluate_js(
+                    win,
+                    "if (window.forceViewportResync) { window.forceViewportResync(); } else { window.dispatchEvent(new Event('resize')); }",
+                )
+
+        if TK_ROOT and SETTINGS_DIALOG_INSTANCE and getattr(SETTINGS_DIALOG_INSTANCE, "is_open", False):
+            try:
+                TK_ROOT.after(0, SETTINGS_DIALOG_INSTANCE.refresh_screen_selector_from_topology)
+            except Exception:
+                pass
+    except Exception as e:
+        log_event("win32", f"Display topology resync warning: {e}")
+
+
+def verify_and_heal_desktop_hwnds():
+    """
+    Periodic lightweight self-healing check that verifies every connected enabled screen's HWND
+    still resides inside the proper Progman/WorkerW parent and matches its monitor's exact pixel
+    rectangle. Automatically repairs WinForms DPI auto-scaling shrinkage or Z-order drift.
+    """
+    progman = user32.FindWindowW("Progman", None)
+    if not progman:
+        return
+    topo = _probe_existing_desktop_topology(progman)
+    target_parent = (
+        progman
+        if topo["is_win11_24h2"]
+        else (topo["classic_workerw"] or topo["workerw_in_progman"] or progman)
+    )
+    if not target_parent:
+        return
+
+    screens_by_id = {s["id"]: s for s in CONNECTED_SCREENS}
+    needs_heal_sids = []
+
+    with INJECTION_LOCK:
+        for sid, hwnd in list(DESKTOP_HWNDS.items()):
+            if not hwnd or not user32.IsWindow(hwnd):
+                continue
+            if sid not in screens_by_id:
+                style = GetWindowLongPtrW(hwnd, GWL_STYLE) & 0xFFFFFFFF
+                if style & WS_VISIBLE:
+                    needs_heal_sids.append(sid)
+                continue
+
+            s_info = screens_by_id[sid]
+            enabled = is_screen_enabled(sid)
+            style = GetWindowLongPtrW(hwnd, GWL_STYLE) & 0xFFFFFFFF
+            is_vis = bool(style & WS_VISIBLE)
+
+            if enabled != is_vis:
+                needs_heal_sids.append(sid)
+                continue
+            if not enabled:
+                continue
+
+            if user32.GetParent(hwnd) != target_parent or not (style & WS_CHILD) or (style & WS_POPUP):
+                needs_heal_sids.append(sid)
+                continue
+
+            rc = wintypes.RECT()
+            if user32.GetWindowRect(hwnd, ctypes.byref(rc)):
+                cur_w = rc.right - rc.left
+                cur_h = rc.bottom - rc.top
+                if (
+                    abs(rc.left - s_info["x"]) > 2
+                    or abs(rc.top - s_info["y"]) > 2
+                    or abs(cur_w - s_info["width"]) > 2
+                    or abs(cur_h - s_info["height"]) > 2
+                ):
+                    needs_heal_sids.append(sid)
+
+    if needs_heal_sids:
+        log_event(
+            "win32",
+            f"Watchdog detected desktop HWND geometry/parent drift on {needs_heal_sids} — auto-repairing.",
+        )
+        sync_all_screens_z_order_and_geometry(target_screen_id=None, force_reattach=True)
+        for sid in needs_heal_sids:
+            win = WEBVIEW_WINDOWS.get(sid)
+            if win:
+                _async_evaluate_js(
+                    win,
+                    "if (window.forceViewportResync) { window.forceViewportResync(); } else { window.dispatchEvent(new Event('resize')); }",
+                )
+    else:
+        restore_desktop_icon_metrics_if_inflated(progman)
+
+
 _IGNORED_FULLSCREEN_CLASS_NAMES = {
     "Progman",
     "WorkerW",
@@ -8220,7 +8774,20 @@ _IGNORED_FULLSCREEN_CLASS_NAMES = {
     "ForegroundStaging",
     "MultitaskingViewFrame",
     "Windows.UI.Core.CoreWindow",
+    "Windows.UI.Composition.DesktopWindowContentBridge",
+    "DesktopWindowXamlSource",
+    "GlassPane",
+    "Glass-Pane",
+    "GlassPaneWindow",
 }
+
+_IGNORED_FULLSCREEN_TITLE_TOKENS = (
+    "glass-pane",
+    "glasspane",
+    "danbooruwallpaper",
+    "task view",
+    "snap assist",
+)
 
 
 def is_window_cloaked(hwnd) -> bool:
@@ -8256,6 +8823,7 @@ def detect_fullscreen_monitors(screens_to_check: list) -> dict:
     excluded_hwnds = {0, desktop_hwnd, shell_hwnd, progman_hwnd} | own_hwnds
     unresolved_screens = {s["id"]: s for s in screens_to_check}
     class_buf = ctypes.create_unicode_buffer(256)
+    title_buf = ctypes.create_unicode_buffer(256)
 
     def _enum_top_windows(hwnd, lparam):
         if not unresolved_screens:
@@ -8275,13 +8843,18 @@ def detect_fullscreen_monitors(screens_to_check: list) -> dict:
             return True
 
         ex_style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & 0xFFFFFFFF
-        # Ignore click-through transparent HUD overlays (e.g., Discord/Steam/GPU overlays)
+        # Ignore click-through transparent HUD overlays (e.g., Discord/Steam/GPU/Glass-Pane overlays)
         if (ex_style & WS_EX_TRANSPARENT) and (ex_style & WS_EX_LAYERED):
             return True
 
         if user32.GetClassNameW(hwnd, class_buf, 256) > 0:
             cname = class_buf.value
-            if cname in _IGNORED_FULLSCREEN_CLASS_NAMES:
+            if cname in _IGNORED_FULLSCREEN_CLASS_NAMES or "glasspane" in cname.lower():
+                return True
+
+        if user32.GetWindowTextW(hwnd, title_buf, 256) > 0:
+            wtitle = title_buf.value.lower()
+            if any(tok in wtitle for tok in _IGNORED_FULLSCREEN_TITLE_TOKENS):
                 return True
 
         if is_window_cloaked(hwnd):
@@ -8342,15 +8915,56 @@ def detect_fullscreen_monitors(screens_to_check: list) -> dict:
 
 def fullscreen_monitor_worker_loop():
     """
-    Lightweight background daemon that polls connected displays every 0.75s for fullscreen applications
-    on screens where 'Pause during full screen application' ('pausefullscreen') is enabled.
-    Automatically pauses the wallpaper on that display to conserve resources and resumes when fullscreen exits.
+    Background watchdog daemon that:
+    1. Polls display topology fingerprints every 0.75s to detect HDMI TV hotplugs (power-on/off),
+       virtual desktop origin shifts, or resolution/DPI changes, debouncing the EDID handshake and
+       automatically resynchronizing all wallpaper HWNDs and desktop icon metrics.
+    2. Periodically verifies and self-heals desktop HWND parent/geometry integrity every ~2.25s.
+    3. Polls connected displays for fullscreen applications on screens where 'pausefullscreen' is enabled.
     """
+    last_committed_sig = None
+    pending_sig = None
+    pending_stable_ticks = 0
+    heal_tick_counter = 0
+
+    try:
+        last_committed_sig = get_display_topology_signature()
+    except Exception:
+        pass
+
     while IS_RUNNING:
         time.sleep(0.75)
-        if not IS_RUNNING or APP_PAUSED:
+        if not IS_RUNNING:
             continue
         try:
+            current_sig = get_display_topology_signature()
+            if last_committed_sig is None:
+                last_committed_sig = current_sig
+            elif current_sig != last_committed_sig:
+                if current_sig == pending_sig:
+                    pending_stable_ticks += 1
+                else:
+                    pending_sig = current_sig
+                    pending_stable_ticks = 1
+
+                # Wait 1 settle tick (~0.75s) for Windows HDMI EDID/DPI negotiation to finish
+                if pending_stable_ticks >= 2:
+                    last_committed_sig = current_sig
+                    pending_sig = None
+                    pending_stable_ticks = 0
+                    resync_all_displays_and_desktop(
+                        reason="HDMI / Display topology change detected by watchdog"
+                    )
+            else:
+                pending_sig = None
+                pending_stable_ticks = 0
+                heal_tick_counter = (heal_tick_counter + 1) % 3
+                if heal_tick_counter == 0:
+                    verify_and_heal_desktop_hwnds()
+
+            if APP_PAUSED:
+                continue
+
             screens_to_check = []
             disabled_fs_screens = []
             for s in list(CONNECTED_SCREENS):
