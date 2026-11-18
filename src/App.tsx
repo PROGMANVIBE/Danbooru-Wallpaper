@@ -606,11 +606,13 @@ const PYINSTALLER_COMMANDS = `# 1. Install required packages into the same Pytho
 pip install pyinstaller pywebview pystray pillow curl_cffi
 
 # 2. Build the single-file Windows executable (--onefile --noconsole)
-#    Includes index.html and project.json, and bundles curl_cffi native binaries if installed
+#    Includes icon.ico (Danbooru cardboard box desktop icon), index.html, project.json, and curl_cffi
 pyinstaller --noconfirm --onefile --noconsole ^
   --name "DanbooruWallpaper" ^
+  --icon "icon.ico" ^
   --add-data "index.html;." ^
   --add-data "project.json;." ^
+  --add-data "icon.ico;." ^
   --hidden-import "curl_cffi" ^
   --collect-all "curl_cffi" ^
   danbooru_service.py`;
@@ -1066,6 +1068,36 @@ export default function App() {
                 </div>
               );
             })}
+
+            <div
+              className={`p-3 rounded border transition ${
+                isDark
+                  ? 'border-zinc-800 bg-zinc-900/50 hover:border-zinc-700'
+                  : 'border-zinc-300 bg-white hover:border-zinc-400'
+              }`}
+            >
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <img
+                    src="/updated_files/icon.ico"
+                    alt="Danbooru Cardboard Box Icon"
+                    className="w-6 h-6 object-contain"
+                  />
+                  <span className="font-mono text-sm font-bold">icon.ico</span>
+                </div>
+                <a
+                  href="/updated_files/icon.ico"
+                  download="icon.ico"
+                  title="Download icon.ico"
+                  className="p-1.5 rounded hover:bg-blue-500/20 text-blue-500 flex items-center gap-1 text-xs font-semibold"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                </a>
+              </div>
+              <p className={`text-xs mt-1.5 leading-relaxed ${isDark ? 'text-zinc-400' : 'text-zinc-600'}`}>
+                Multi-resolution Windows desktop icon (16×16 through 256×256 RGBA) matching the system tray Danbooru cardboard box icon (<code className="font-mono">create_cardboard_box_icon()</code>).
+              </p>
+            </div>
 
             <div
               className={`mt-auto p-3 rounded border text-xs space-y-1.5 ${
