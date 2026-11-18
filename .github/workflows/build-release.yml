@@ -1,15 +1,20 @@
 name: Build Windows Executable
 
 on:
-  # 1. Automatically runs when you publish a new Release on GitHub
   release:
-    types: [published]
-
-  # 2. Also lets you trigger a test build manually from the "Actions" tab anytime
+    types: [published, edited]
   workflow_dispatch:
+    inputs:
+      target_tag:
+        description: 'Optional: Release tag to upload to (leave blank to auto-detect latest release)'
+        required: false
+        default: ''
 
 permissions:
   contents: write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   build-windows:
@@ -38,8 +43,18 @@ jobs:
           }
 
       - name: Build DanbooruWallpaper.exe with PyInstaller
+        shell: pwsh
         run: |
-          pyinstaller --noconsole --onefile --clean --name DanbooruWallpaper --icon=icon.ico --add-data "index.html;." --add-data "project.json;." --add-data "GLOSSARY.md;." --add-data "icon.ico;." danbooru_service.py
+          $addData = @()
+          foreach ($file in @("index.html", "project.json", "GLOSSARY.md", "icon.ico")) {
+            if (Test-Path $file) {
+              $addData += "--add-data"
+              $addData += "$file;."
+            } else {
+              Write-Warning "$file not found in repository root!"
+            }
+          }
+          pyinstaller --noconsole --onefile --clean --name DanbooruWallpaper --icon=icon.ico @addData danbooru_service.py
 
       - name: Generate SHA256 Checksum
         shell: pwsh
@@ -47,7 +62,6 @@ jobs:
           $hash = (Get-FileHash -Path "dist/DanbooruWallpaper.exe" -Algorithm SHA256).Hash
           "$hash  DanbooruWallpaper.exe" | Out-File -FilePath "dist/DanbooruWallpaper.exe.sha256" -Encoding ascii
 
-      # Always uploads the .exe to the Actions run summary (great for manual test builds)
       - name: Upload Artifact to Workflow Run
         uses: actions/upload-artifact@v4
         with:
@@ -56,11 +70,25 @@ jobs:
             dist/DanbooruWallpaper.exe
             dist/DanbooruWallpaper.exe.sha256
 
-      # Automatically attaches the .exe to your public GitHub Release page when you publish a release
       - name: Attach .exe to GitHub Release
-        if: github.event_name == 'release'
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            dist/DanbooruWallpaper.exe
-            dist/DanbooruWallpaper.exe.sha256
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # 1. Determine which Release tag to upload to
+          $tag = "${{ github.event.inputs.target_tag }}"
+          if ([string]::IsNullOrWhiteSpace($tag) -and "${{ github.event_name }}" -eq "release") {
+            $tag = "${{ github.event.release.tag_name }}"
+          }
+          if ([string]::IsNullOrWhiteSpace($tag)) {
+            # Auto-detect the latest published release in the repo
+            $tag = (gh release view --json tagName -q .tagName 2>$null)
+          }
+
+          if ([string]::IsNullOrWhiteSpace($tag)) {
+            Write-Warning "No existing GitHub Release found! Create a Release on GitHub first, or download the .exe from the Artifacts section of this workflow run."
+          } else {
+            Write-Host "Uploading DanbooruWallpaper.exe to Release '$tag'..."
+            gh release upload $tag "dist/DanbooruWallpaper.exe" "dist/DanbooruWallpaper.exe.sha256" --clobber
+            Write-Host "Successfully attached DanbooruWallpaper.exe to Release '$tag'!"
+          }
