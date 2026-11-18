@@ -19,6 +19,9 @@ env:
 jobs:
   build-windows:
     runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: public/updated_files
 
     steps:
       - name: Checkout repository code
@@ -34,61 +37,30 @@ jobs:
           python -m pip install --upgrade pip
           pip install pystray Pillow pywebview curl_cffi pyinstaller
 
-      - name: Ensure icon.ico exists
-        shell: pwsh
+      - name: Generate icon.ico if not present
         run: |
-          if (-not (Test-Path "icon.ico")) {
-            Write-Host "No icon.ico found in repo; generating default icon.ico..."
-            python -c "from PIL import Image, ImageDraw; img = Image.new('RGBA', (64, 64), (10, 25, 47, 255)); d = ImageDraw.Draw(img); d.rectangle([16, 16, 48, 48], fill=(100, 255, 218, 255)); img.save('icon.ico', format='ICO')"
-          }
+          python -c "import os; from PIL import Image, ImageDraw; img = Image.new('RGBA', (64, 64), (10, 25, 47, 255)); d = ImageDraw.Draw(img); d.rectangle([16, 16, 48, 48], fill=(100, 255, 218, 255)); img.save('icon.ico', format='ICO') if not os.path.exists('icon.ico') else None"
 
       - name: Build DanbooruWallpaper.exe with PyInstaller
-        shell: pwsh
         run: |
-          $addData = @()
-          foreach ($file in @("index.html", "project.json", "GLOSSARY.md", "icon.ico")) {
-            if (Test-Path $file) {
-              $addData += "--add-data"
-              $addData += "$file;."
-            } else {
-              Write-Warning "$file not found in repository root!"
-            }
-          }
-          pyinstaller --noconsole --onefile --clean --name DanbooruWallpaper --icon=icon.ico @addData danbooru_service.py
+          pyinstaller --noconsole --onefile --clean --name DanbooruWallpaper --icon=icon.ico --add-data "index.html;." --add-data "project.json;." --add-data "GLOSSARY.md;." --add-data "icon.ico;." danbooru_service.py
 
       - name: Generate SHA256 Checksum
-        shell: pwsh
         run: |
-          $hash = (Get-FileHash -Path "dist/DanbooruWallpaper.exe" -Algorithm SHA256).Hash
-          "$hash  DanbooruWallpaper.exe" | Out-File -FilePath "dist/DanbooruWallpaper.exe.sha256" -Encoding ascii
+          python -c "import hashlib; h = hashlib.sha256(open('dist/DanbooruWallpaper.exe', 'rb').read()).hexdigest().upper(); open('dist/DanbooruWallpaper.exe.sha256', 'w').write(f'{h}  DanbooruWallpaper.exe\n'); print(f'SHA256: {h}')"
 
       - name: Upload Artifact to Workflow Run
         uses: actions/upload-artifact@v4
         with:
           name: DanbooruWallpaper-Windows
           path: |
-            dist/DanbooruWallpaper.exe
-            dist/DanbooruWallpaper.exe.sha256
+            public/updated_files/dist/DanbooruWallpaper.exe
+            public/updated_files/dist/DanbooruWallpaper.exe.sha256
 
       - name: Attach .exe to GitHub Release
-        shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_TAG: ${{ github.event.inputs.target_tag }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
-          # 1. Determine which Release tag to upload to
-          $tag = "${{ github.event.inputs.target_tag }}"
-          if ([string]::IsNullOrWhiteSpace($tag) -and "${{ github.event_name }}" -eq "release") {
-            $tag = "${{ github.event.release.tag_name }}"
-          }
-          if ([string]::IsNullOrWhiteSpace($tag)) {
-            # Auto-detect the latest published release in the repo
-            $tag = (gh release view --json tagName -q .tagName 2>$null)
-          }
-
-          if ([string]::IsNullOrWhiteSpace($tag)) {
-            Write-Warning "No existing GitHub Release found! Create a Release on GitHub first, or download the .exe from the Artifacts section of this workflow run."
-          } else {
-            Write-Host "Uploading DanbooruWallpaper.exe to Release '$tag'..."
-            gh release upload $tag "dist/DanbooruWallpaper.exe" "dist/DanbooruWallpaper.exe.sha256" --clobber
-            Write-Host "Successfully attached DanbooruWallpaper.exe to Release '$tag'!"
-          }
+          python -c "import os, subprocess, json; tag = os.environ.get('INPUT_TAG', '').strip() or os.environ.get('RELEASE_TAG', '').strip(); res = subprocess.run(['gh', 'release', 'list', '--limit', '1', '--json', 'tagName'], capture_output=True, text=True); tag = tag or (json.loads(res.stdout)[0]['tagName'] if res.returncode == 0 and json.loads(res.stdout or '[]') else ''); print(f'Target release tag: {tag}'); subprocess.run(['gh', 'release', 'upload', tag, 'dist/DanbooruWallpaper.exe', 'dist/DanbooruWallpaper.exe.sha256', '--clobber'], check=True) if tag else print('WARNING: No published GitHub Release found in this repo!')"
