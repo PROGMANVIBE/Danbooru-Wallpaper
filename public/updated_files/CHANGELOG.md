@@ -8,6 +8,26 @@ All notable changes to the **Danbooru Wallpaper Application** are documented in 
 
 ---
 
+## v2.3.13 — Removed Slideshow and Masonry Bottom Settings Description Lines
+
+### Summary
+This update cleans up the bottom of the **Display** settings tab by removing the multi-line helper description notes underneath the **Slideshow** and **Masonry** display mode settings.
+
+### Add or Changed
+- **Streamlined Slideshow & Masonry Display Settings Layout**: Kept the **Slideshow** and **Masonry** mode sections compact and uncluttered above the **"Save & Apply Display Settings"** button.
+
+### Removed
+- **Slideshow Settings Description Text**: Removed the 2-line bulleted description text (`slide_note`) at the bottom of the **Slideshow** settings section.
+- **Masonry Settings Description Text**: Removed the 3-line bulleted description text (`masonry_note`) at the bottom of the **Masonry** settings section.
+
+### Technical
+- **Settings UI Cleanup (`danbooru_service.py`)**:
+  - Removed the `slide_note` (`tk.Label`) widget from `self.slideshow_section_frame` and `self._themed_labels_muted` in `SettingsDialog._build_display_tab()`.
+  - Removed the `masonry_note` (`tk.Label`) widget from `self.masonry_section_frame` and `self._themed_labels_muted` in `SettingsDialog._build_display_tab()`.
+  - Removed `slide_note` and `masonry_note` from the click-outside `<Button-1>` focus-release binding tuple (`_defocus_tag_input_on_outside_click`).
+
+---
+
 ## v2.3.12 — Win32 HDMI Hotplug Hardening, Desktop Icon Scale Protection, Glass-Pane Coexistence & Automatic Desktop Recovery Watchdog
 
 ### Summary

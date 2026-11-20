@@ -6392,16 +6392,6 @@ class SettingsDialog(tk.Toplevel):
         for pkey in ("slideshowfade", "slideshowduration"):
             self._create_numeric_row(self.slideshow_section_frame, pkey, self.NUMERIC_SPECS[pkey])
 
-        slide_note = tk.Label(
-            self.slideshow_section_frame,
-            text="• Automatically filters API posts to match screen orientation (Landscape vs. Portrait).\n"
-                 "• Fade Transition: 0 = instant change (0.0s), 10 = 1.0 second smooth cross-fade.",
-            justify="left", anchor="w",
-            font=("Segoe UI", 8), fg=self.text_muted, bg=self.bg_base
-        )
-        slide_note.pack(anchor="w", pady=(8, 2))
-        self._themed_labels_muted.append(slide_note)
-
         # 4. MASONRY MODE SECTION
         self.masonry_section_frame = tk.Frame(self.mode_sections_holder, bg=self.bg_base)
         self._themed_frames.append(self.masonry_section_frame)
@@ -6461,17 +6451,6 @@ class SettingsDialog(tk.Toplevel):
         for pkey in ("masonrytiles", "masonrygap", "masonrydelay"):
             self._create_numeric_row(self.masonry_section_frame, pkey, self.NUMERIC_SPECS[pkey])
 
-        masonry_note = tk.Label(
-            self.masonry_section_frame,
-            text="• Masonry Layout Button: Switch between 'Masonry Layout: Mondrian' (BSP Tree) and 'Masonry Layout: Rows' (Uncropped Rows).\n"
-                 "• Edge Fill Button: Switch between 'Edge Fill: Blur' (ambient edge blur) and 'Edge Fill: Black' (gap-matched black space).\n"
-                 "• Target Tile Count (4 – 36): Flexible ±25% solver window adjusts tile count & layout on flip to eliminate blur/cropping.",
-            justify="left", anchor="w",
-            font=("Segoe UI", 8), fg=self.text_muted, bg=self.bg_base
-        )
-        masonry_note.pack(anchor="w", pady=(8, 2))
-        self._themed_labels_muted.append(masonry_note)
-
         btn_row = tk.Frame(pad_frame, bg=self.bg_base)
         btn_row.pack(fill="x", side="bottom", pady=(6, 0))
         self._themed_frames.append(btn_row)
@@ -6516,11 +6495,9 @@ class SettingsDialog(tk.Toplevel):
             fill_lbl,
             self.slideshow_section_frame,
             slide_hdr,
-            slide_note,
             self.masonry_section_frame,
             masonry_hdr,
             layout_row,
-            masonry_note,
             btn_row,
         ):
             try:

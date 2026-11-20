@@ -34,25 +34,25 @@ const FILE_LIST: { key: FileKey; path: string; label: string; desc: string }[] =
     key: 'danbooru_service.py',
     path: '/updated_files/danbooru_service.py',
     label: 'danbooru_service.py',
-    desc: 'v2.3.12 service featuring HDMI TV hotplug watchdog & dynamic WebView2 provisioning, non-destructive _probe_existing_desktop_topology (conditional 0x052C), SHELLDLL_DefView desktop icon scale snapshot & restoration, passive WS_DISABLED + WS_EX_TRANSPARENT child styles, disconnected monitor hiding, collision-free persistent monitor IDs, Glass-Pane coexistence, and manual Resync Displays button in Settings & Tray.',
+    desc: 'v2.3.13 service featuring cleaned-up Slideshow & Masonry settings panels (removed bottom helper description lines), HDMI TV hotplug watchdog & dynamic WebView2 provisioning, non-destructive _probe_existing_desktop_topology (conditional 0x052C), SHELLDLL_DefView desktop icon scale snapshot & restoration, passive WS_DISABLED + WS_EX_TRANSPARENT child styles, disconnected monitor hiding, collision-free persistent monitor IDs, Glass-Pane coexistence, and manual Resync Displays button in Settings & Tray.',
   },
   {
     key: 'index.html',
     path: '/updated_files/index.html',
     label: 'index.html',
-    desc: 'v2.3.12 WebView2 renderer with explicit pinch/Ctrl+Wheel/Ctrl+Key zoom blockers, 120ms debounced window resize handler (preventing mid-handshake HDMI layout thrashing), window.forceViewportResync() hook, and full pause/solver optimizations.',
+    desc: 'v2.3.13 WebView2 renderer with explicit pinch/Ctrl+Wheel/Ctrl+Key zoom blockers, 120ms debounced window resize handler (preventing mid-handshake HDMI layout thrashing), window.forceViewportResync() hook, and full pause/solver optimizations.',
   },
   {
     key: 'project.json',
     path: '/updated_files/project.json',
     label: 'project.json',
-    desc: 'v2.3.12 wallpaper configuration schema synchronized 1:1 with get_default_properties_dict(), including per-screen pausefullscreen (bool, default true) and Edge Fill metadata.',
+    desc: 'v2.3.13 wallpaper configuration schema synchronized 1:1 with get_default_properties_dict(), including per-screen pausefullscreen (bool, default true) and Edge Fill metadata.',
   },
   {
     key: 'README.md',
     path: '/updated_files/README.md',
     label: 'README.md',
-    desc: 'Updated v2.3.12 README documenting Windows 11 24H2+ HDMI hotplug recovery, SHELLDLL_DefView icon scale guard, Glass-Pane coexistence, Resync Displays controls, and security hardening.',
+    desc: 'Updated v2.3.13 README documenting Windows 11 24H2+ HDMI hotplug recovery, SHELLDLL_DefView icon scale guard, Glass-Pane coexistence, Resync Displays controls, and security hardening.',
   },
   {
     key: 'GLOSSARY.md',
@@ -64,7 +64,7 @@ const FILE_LIST: { key: FileKey; path: string; label: string; desc: string }[] =
     key: 'CHANGELOG.md',
     path: '/updated_files/CHANGELOG.md',
     label: 'CHANGELOG.md',
-    desc: 'Formalized release notes across all versions (v2.0.0 – v2.3.12), organized consistently into 4 sections per version: Summary, Add or Changed, Removed, and Technical.',
+    desc: 'Formalized release notes across all versions (v2.0.0 – v2.3.13), organized consistently into 4 sections per version: Summary, Add or Changed, Removed, and Technical.',
   },
 ];
 
@@ -267,6 +267,15 @@ const SECURITY_AUDIT_ITEMS = [
 ];
 
 const FEATURE_SUMMARY_ITEMS = [
+  {
+    id: 'UI-CLEANUP (v2.3.13)',
+    severity: 'v2.3.13 REMOVED SLIDESHOW & MASONRY BOTTOM SETTINGS DESCRIPTION LINES',
+    file: 'danbooru_service.py & CHANGELOG.md',
+    issue: 'Remove Multi-Line Helper Description Notes Below Slideshow and Masonry Display Settings',
+    cause:
+      'User requested removing the multi-line text descriptions (`slide_note` and `masonry_note`) at the bottom under the display settings for both the Slideshow and Masonry modes.',
+    fix: 'Removed `slide_note` (`tk.Label`) from `self.slideshow_section_frame` and `masonry_note` (`tk.Label`) from `self.masonry_section_frame` in `SettingsDialog._build_display_tab()`, along with their `_themed_labels_muted` entries and click-outside `<Button-1>` focus-release bindings.',
+  },
   {
     id: 'AUDIT-HOTPLUG (v2.3.12)',
     severity: 'CRITICAL WINDOWS 11 24H2+ HDMI TV HOTPLUG, TASK VIEW TILING & DESKTOP ICON INFLATION FIX',
@@ -932,7 +941,7 @@ export default function App() {
         <div>
           <h1 className="text-base font-bold tracking-tight flex items-center gap-2">
             <LayoutGrid className="w-5 h-5 text-blue-500" />
-            Danbooru Wallpaper Suite v2.3.12 — Win11 24H2+ HDMI Hotplug Watchdog, Desktop Icon Guard &amp; Passive Win32 HWNDs
+            Danbooru Wallpaper Suite v2.3.13 — Clean Slideshow/Masonry Settings UI &amp; Win11 24H2+ HDMI Hotplug Watchdog
           </h1>
           <p className={`text-xs mt-0.5 ${isDark ? 'text-zinc-400' : 'text-zinc-600'}`}>
             Conditional 0x052C Probe • SHELLDLL_DefView Icon Scale Guard • Disconnected HDMI TV Auto-Hide • Glass-Pane Coexistence • Resync Displays Button
@@ -1106,7 +1115,10 @@ export default function App() {
             >
               <div className="font-semibold flex items-center gap-1.5 text-emerald-500">
                 <Wrench className="w-3.5 h-3.5" />
-                Verified v2.3.12 Updates
+                Verified v2.3.13 Updates
+              </div>
+              <div>
+                • <strong>Slideshow &amp; Masonry UI Cleanup</strong>: Removed bottom text description lines (<code>slide_note</code> &amp; <code>masonry_note</code>) from Slideshow and Masonry display settings.
               </div>
               <div>
                 • <strong>Conditional 0x052C &amp; Icon Guard</strong>: Probes existing <code>WorkerW</code> without rebroadcasting <code>0x052C</code> and restores <code>SHELLDLL_DefView</code> icon metrics if HDMI DPI changes inflate them.
