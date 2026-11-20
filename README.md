@@ -70,8 +70,10 @@ Run the following command in PowerShell from the project directory:
 ```powershell
 python -m PyInstaller --noconfirm --onefile --noconsole `
   --name "DanbooruWallpaper" `
+  --icon "icon.ico" `
   --add-data "index.html;." `
   --add-data "project.json;." `
+  --add-data "icon.ico;." `
   --hidden-import "webview" `
   --hidden-import "pystray" `
   --hidden-import "PIL" `
