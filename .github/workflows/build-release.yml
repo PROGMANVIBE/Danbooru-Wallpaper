@@ -19,13 +19,32 @@ env:
 jobs:
   build-windows:
     runs-on: windows-latest
-    defaults:
-      run:
-        working-directory: public/updated_files
 
     steps:
       - name: Checkout repository code
         uses: actions/checkout@v4
+
+      - name: Locate Danbooru Wallpaper source directory
+        id: locate_src
+        shell: pwsh
+        run: |
+          if (Test-Path "danbooru_service.py") {
+            Write-Host "Found danbooru_service.py in repository root (.)"
+            "dir=." | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          } elseif (Test-Path "public/updated_files/danbooru_service.py") {
+            Write-Host "Found danbooru_service.py in public/updated_files"
+            "dir=public/updated_files" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          } else {
+            $found = Get-ChildItem -Path . -Filter "danbooru_service.py" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($found) {
+              $relDir = Resolve-Path -Path $found.Directory.FullName -Relative
+              Write-Host "Found danbooru_service.py in $relDir"
+              "dir=$relDir" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+            } else {
+              Write-Error "ERROR: Could not find danbooru_service.py anywhere in the repository!"
+              exit 1
+            }
+          }
 
       - name: Set up Python 3.12
         uses: actions/setup-python@v5
@@ -38,14 +57,17 @@ jobs:
           pip install pystray Pillow pywebview curl_cffi pyinstaller
 
       - name: Generate multi-size cardboard box icon.ico
+        working-directory: ${{ steps.locate_src.outputs.dir }}
         run: |
           python -c "from PIL import Image, ImageDraw; s=4; img=Image.new('RGBA',(64*s,64*s),(0,0,0,0)); d=ImageDraw.Draw(img); sc=lambda pts:[(x*s,y*s) for x,y in pts]; d.polygon(sc([(14,25),(32,33),(50,25),(32,18)]),fill=(115,78,42,255)); d.polygon(sc([(14,25),(32,33),(32,57),(14,49)]),fill=(150,105,60,255)); d.polygon(sc([(32,33),(50,25),(50,49),(32,57)]),fill=(194,142,86,255)); d.line(sc([(32,33),(32,57)]),fill=(130,88,50,255),width=2*s); d.polygon(sc([(14,25),(32,33),(25,23),(8,17)]),fill=(212,162,106,255)); d.line(sc([(14,25),(8,17)]),fill=(150,105,60,255),width=1*s); d.polygon(sc([(32,33),(50,25),(56,17),(39,23)]),fill=(212,162,106,255)); d.line(sc([(50,25),(56,17)]),fill=(150,105,60,255),width=1*s); d.polygon(sc([(14,25),(32,18),(28,11),(11,16)]),fill=(212,162,106,255)); d.polygon(sc([(32,18),(50,25),(53,16),(36,11)]),fill=(212,162,106,255)); img.save('icon.ico',format='ICO',bitmap_format='bmp',sizes=[(256,256),(128,128),(64,64),(48,48),(32,32),(16,16)])"
 
       - name: Build DanbooruWallpaper.exe with PyInstaller
+        working-directory: ${{ steps.locate_src.outputs.dir }}
         run: |
           python -m PyInstaller --noconfirm --noconsole --onefile --clean --name DanbooruWallpaper --icon="icon.ico" --add-data "index.html;." --add-data "project.json;." --add-data "GLOSSARY.md;." --add-data "icon.ico;." --hidden-import "webview" --hidden-import "pystray" --hidden-import "PIL" --hidden-import "curl_cffi" --collect-all "curl_cffi" danbooru_service.py
 
       - name: Generate SHA256 Checksum
+        working-directory: ${{ steps.locate_src.outputs.dir }}
         run: |
           python -c "import hashlib; h = hashlib.sha256(open('dist/DanbooruWallpaper.exe', 'rb').read()).hexdigest().upper(); open('dist/DanbooruWallpaper.exe.sha256', 'w').write(f'{h}  DanbooruWallpaper.exe\n'); print(f'SHA256: {h}')"
 
@@ -54,10 +76,11 @@ jobs:
         with:
           name: DanbooruWallpaper-Windows
           path: |
-            public/updated_files/dist/DanbooruWallpaper.exe
-            public/updated_files/dist/DanbooruWallpaper.exe.sha256
+            ${{ steps.locate_src.outputs.dir }}/dist/DanbooruWallpaper.exe
+            ${{ steps.locate_src.outputs.dir }}/dist/DanbooruWallpaper.exe.sha256
 
       - name: Attach .exe to GitHub Release
+        working-directory: ${{ steps.locate_src.outputs.dir }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           INPUT_TAG: ${{ github.event.inputs.target_tag }}

@@ -26,7 +26,7 @@ import {
   Trash2,
 } from 'lucide-react';
 
-type FileKey = 'CHANGELOG.md' | 'README.md' | 'GLOSSARY.md' | 'danbooru_service.py' | 'index.html' | 'project.json';
+type FileKey = 'CHANGELOG.md' | 'README.md' | 'GLOSSARY.md' | 'danbooru_service.py' | 'index.html' | 'project.json' | 'build-release.yml';
 type ViewTab = 'code' | 'preview' | 'audit' | 'build';
 
 const FILE_LIST: { key: FileKey; path: string; label: string; desc: string }[] = [
@@ -65,6 +65,12 @@ const FILE_LIST: { key: FileKey; path: string; label: string; desc: string }[] =
     path: '/updated_files/CHANGELOG.md',
     label: 'CHANGELOG.md',
     desc: 'Formalized release notes across all versions (v2.0.0 – v2.3.13), organized consistently into 4 sections per version: Summary, Add or Changed, Removed, and Technical.',
+  },
+  {
+    key: 'build-release.yml',
+    path: '/updated_files/build-release.yml',
+    label: '.github/workflows/build-release.yml',
+    desc: 'GitHub Actions workflow that auto-detects the source directory (whether danbooru_service.py is in the repo root or public/updated_files/), builds DanbooruWallpaper.exe with PyInstaller, generates a SHA256 checksum, and attaches both to the GitHub Release.',
   },
 ];
 
