@@ -34,37 +34,37 @@ const FILE_LIST: { key: FileKey; path: string; label: string; desc: string }[] =
     key: 'danbooru_service.py',
     path: '/updated_files/danbooru_service.py',
     label: 'danbooru_service.py',
-    desc: 'v2.3.13 service featuring cleaned-up Slideshow & Masonry settings panels (removed bottom helper description lines), HDMI TV hotplug watchdog & dynamic WebView2 provisioning, non-destructive _probe_existing_desktop_topology (conditional 0x052C), SHELLDLL_DefView desktop icon scale snapshot & restoration, passive WS_DISABLED + WS_EX_TRANSPARENT child styles, disconnected monitor hiding, collision-free persistent monitor IDs, Glass-Pane coexistence, and manual Resync Displays button in Settings & Tray.',
+    desc: 'v2.3.15 service resolving all 12 Principal Audit findings: explicit 64-bit ctypes signatures on ShowWindow & SetForegroundWindow, TOPOLOGY_LOCK & _RESYNC_LOCK display hotplug synchronization, exact HTTP Range byte-0 slicing & mid-stream 64-byte preflight verification, fail-closed DoHSNIHTTPSConnection & HybridDoHSession._lock, wrap-around Page-1 backoff, legacy project.json normalization, Tkinter timer cleanup, and AppResourceMonitor PDH handle finalizers.',
   },
   {
     key: 'index.html',
     path: '/updated_files/index.html',
     label: 'index.html',
-    desc: 'v2.3.13 WebView2 renderer with explicit pinch/Ctrl+Wheel/Ctrl+Key zoom blockers, 120ms debounced window resize handler (preventing mid-handshake HDMI layout thrashing), window.forceViewportResync() hook, and full pause/solver optimizations.',
+    desc: 'v2.3.15 WebView2 renderer restoring #masonryLoadingOverlay.active & .fade-out CSS rules + #stage.masonry-black-mode alias, GIF preloader AbortController & full pause guards, Polaroid freeze-snapshot z-order sorting & viewport resize live-stack re-projection, createMediaElementFromDescriptor inFlightMedia tracking, and pre-staged Masonry reflowPlan viewport/gap/layout validation stamps.',
   },
   {
     key: 'project.json',
     path: '/updated_files/project.json',
     label: 'project.json',
-    desc: 'v2.3.13 wallpaper configuration schema synchronized 1:1 with get_default_properties_dict(), including per-screen pausefullscreen (bool, default true) and Edge Fill metadata.',
+    desc: 'v2.3.15 wallpaper configuration schema synchronized 1:1 with get_default_properties_dict() and SettingsDialog.NUMERIC_SPECS.',
   },
   {
     key: 'README.md',
     path: '/updated_files/README.md',
     label: 'README.md',
-    desc: 'Updated v2.3.13 README documenting Windows 11 24H2+ HDMI hotplug recovery, SHELLDLL_DefView icon scale guard, Glass-Pane coexistence, Resync Displays controls, and security hardening.',
+    desc: 'v2.3.15 README documenting PyInstaller single-instance protection & duplicate-launch Settings window handoff, Windows 11 24H2+ HDMI hotplug recovery, SHELLDLL_DefView icon scale guard, and security hardening.',
   },
   {
     key: 'GLOSSARY.md',
     path: '/updated_files/GLOSSARY.md',
     label: 'GLOSSARY.md',
-    desc: 'Standalone Application Logs Glossary documenting all Normal Operation, User Interaction, and Error/Security/Warning log prefixes.',
+    desc: 'Standalone Application Logs Glossary documenting all Normal Operation, User Interaction (including duplicate launch handoff), and Error/Security/Warning log prefixes.',
   },
   {
     key: 'CHANGELOG.md',
     path: '/updated_files/CHANGELOG.md',
     label: 'CHANGELOG.md',
-    desc: 'Formalized release notes across all versions (v2.0.0 – v2.3.13), organized consistently into 4 sections per version: Summary, Add or Changed, Removed, and Technical.',
+    desc: 'Formalized release notes across all versions (v2.0.0 – v2.3.15), including the v2.3.15 Principal Systems, Concurrency, Rendering & Security Audit Remediation.',
   },
   {
     key: 'build-release.yml',
@@ -273,6 +273,24 @@ const SECURITY_AUDIT_ITEMS = [
 ];
 
 const FEATURE_SUMMARY_ITEMS = [
+  {
+    id: 'AUDIT-PRINCIPAL (v2.3.15)',
+    severity: '12 VERIFIED PRINCIPAL SYSTEMS, CONCURRENCY, RENDERING & SECURITY AUDIT FIXES',
+    file: 'danbooru_service.py, index.html & CHANGELOG.md',
+    issue: 'Resolve All 12 Verified Audit Findings Across 64-Bit Win32 ctypes, Display Topology Concurrency, Masonry Loading Overlay CSS, HTTP Range Proxy Slicing, Fail-Closed DoH TLS, GIF Pause AbortController & Polaroid Resize/Freeze Z-Order',
+    cause:
+      'Exhaustive line-by-line audit uncovered 3 Critical, 4 High, 4 Medium, and 2 Low findings: [CRITICAL-01] Missing 64-bit argtypes/restype on user32.ShowWindow and user32.SetForegroundWindow causing HWND pointer truncation above 0x7FFFFFFF; [CRITICAL-02] Unsynchronized concurrent mutation/iteration of CONNECTED_SCREENS and overlapping resync_all_displays_and_desktop() execution across watchdog, Tkinter UI, and tray threads; [CRITICAL-03] Missing #masonryLoadingOverlay.active & .fade-out CSS rules and #stage.masonry-black-mode selector alias leaving the Masonry Cardboard Box Loading Screen permanently display:none; [HIGH-01] /media HTTP Range byte-0 probe expansion returning 64KB instead of requested N+1 bytes and unverified mid-stream Range seeks degrading to 200 OK; [HIGH-02] Fail-open OS DNS fallback in DoHSNIHTTPSConnection.connect() on DoH failure and unlocked HybridDoHSession state mutation; [HIGH-03] In-flight GIF fetch() lacking AbortController and APP_PAUSED/WALLPAPER_PAUSED checks; [HIGH-04] Polaroid renderFreezeSnapshot() unsorted array concatenation inverting z-order on pause and missing live-stack coordinate re-projection on viewport resize; [MEDIUM-01] Legacy scrolldirection/searchtags normalization, NUMERIC_SPECS label parity, and Polaroid minsize > maxsize UI desync; [MEDIUM-02] fill_tag_pool() wrap-around retry skipping Page 1 on transient failure; [MEDIUM-03] createMediaElementFromDescriptor ("Previous" navigation) untracked in inFlightMedia; [MEDIUM-04] Pre-staged Masonry reflowPlan missing viewport/gap/layout validation stamps; [LOW-01/02] Uncancelled Tkinter after() timers, outdated Masonry header text, and missing AppResourceMonitor PDH finalizer.',
+    fix: 'Applied all 12 exact code fixes directly across danbooru_service.py and index.html, synchronized CHANGELOG.md, and verified Python syntax compilation and TypeScript build.',
+  },
+  {
+    id: 'AUDIT-SINGLE-INSTANCE (v2.3.14)',
+    severity: 'CRITICAL PYINSTALLER SINGLE-INSTANCE MUTEX, SETTINGS FOREGROUND HANDOFF & EXCLUSIVE PORT BINDING FIX',
+    file: 'danbooru_service.py (enforce_single_instance_or_exit, _signal_existing_instance_to_show_settings, single_instance_signal_worker_loop, ReusableThreadingHTTPServer)',
+    issue: 'Prevent Duplicate PyInstaller .exe Instances, Multiple System Tray Icons & Windows SO_REUSEADDR Port 8088 Collisions while Bringing Settings to the Foreground on Re-Launch',
+    cause:
+      'Audit of the Python startup flow and PyInstaller `--onefile` execution uncovered two interacting root causes: (1) `danbooru_service.py` had zero Win32 Named Mutex check at the top of the entry script prior to importing heavy third-party modules (`webview`, `curl_cffi`, `pystray`, `PIL`, `tkinter`), leaving a ~400–900ms startup window and allowing any duplicate launch of `DanbooruWallpaper.exe` to initialize completely; and (2) `ReusableThreadingHTTPServer` set `allow_reuse_address = True` (`SO_REUSEADDR`). Unlike POSIX, Windows treats `SO_REUSEADDR` as permission for multiple distinct OS processes to bind and listen on the exact same `127.0.0.1:8088` TCP port simultaneously without raising `WSAEADDRINUSE` (`WinError 10048`), allowing a second `.exe` to silently hijack port 8088, spawn a second system tray icon, and inject duplicate WebView2 windows.',
+    fix: 'Implemented a 3-layer defense: (1) Added `enforce_single_instance_or_exit()` at the top of `danbooru_service.py` (before third-party imports) using `ctypes.WinDLL("kernel32", use_last_error=True)` and `CreateMutexW(None, False, "Local\\\\DanbooruWallpaper_SingleInstance_Mutex_v1")` with global handle retention (`_SINGLE_INSTANCE_MUTEX_HANDLE`, `_SINGLE_INSTANCE_EVENT_HANDLE`)—completely immune to the PyInstaller `--onefile` parent/child bootloader trap; (2) When `ctypes.get_last_error() == ERROR_ALREADY_EXISTS (183)`, the duplicate process signals `"Local\\\\DanbooruWallpaper_ShowSettings_Event_v1"` via `OpenEventW`/`SetEvent` (plus a 0.35s loopback fallback `GET /show_settings`) and exits immediately via `os._exit(0)`, waking `single_instance_signal_worker_loop()` in the primary instance to open and elevate Settings via `SetForegroundWindow`; and (3) Enforced `allow_reuse_address = (os.name != "nt")` + `socket.SO_EXCLUSIVEADDRUSE` on Windows in `ReusableThreadingHTTPServer.server_bind()`, while preserving 100% of multi-monitor shared `TAG_POOLS` deduplication.',
+  },
   {
     id: 'UI-CLEANUP (v2.3.13)',
     severity: 'v2.3.13 REMOVED SLIDESHOW & MASONRY BOTTOM SETTINGS DESCRIPTION LINES',
@@ -947,10 +965,10 @@ export default function App() {
         <div>
           <h1 className="text-base font-bold tracking-tight flex items-center gap-2">
             <LayoutGrid className="w-5 h-5 text-blue-500" />
-            Danbooru Wallpaper Suite v2.3.13 — Clean Slideshow/Masonry Settings UI &amp; Win11 24H2+ HDMI Hotplug Watchdog
+            Danbooru Wallpaper Suite v2.3.15 — Principal Systems, Concurrency, Rendering &amp; Security Audit Remediation
           </h1>
           <p className={`text-xs mt-0.5 ${isDark ? 'text-zinc-400' : 'text-zinc-600'}`}>
-            Conditional 0x052C Probe • SHELLDLL_DefView Icon Scale Guard • Disconnected HDMI TV Auto-Hide • Glass-Pane Coexistence • Resync Displays Button
+            12 Verified Audit Fixes Applied • 64-Bit ctypes Guard • TOPOLOGY_LOCK Hotplug Sync • Masonry Box Overlay CSS • Fail-Closed DoH &amp; Exact HTTP Range
           </p>
         </div>
 
@@ -1121,19 +1139,19 @@ export default function App() {
             >
               <div className="font-semibold flex items-center gap-1.5 text-emerald-500">
                 <Wrench className="w-3.5 h-3.5" />
-                Verified v2.3.13 Updates
+                Verified v2.3.14 Updates
+              </div>
+              <div>
+                • <strong>Pre-Import Win32 Named Mutex</strong>: Acquires <code>Local\DanbooruWallpaper_SingleInstance_Mutex_v1</code> before heavy imports and terminates duplicates via <code>os._exit(0)</code>.
+              </div>
+              <div>
+                • <strong>Duplicate Launch Settings Handoff</strong>: Launching <code>.exe</code> again signals the primary instance via <code>SetEvent</code> to open and focus Settings via <code>SetForegroundWindow</code>.
+              </div>
+              <div>
+                • <strong>Exclusive TCP Port 8088</strong>: Replaces Windows <code>SO_REUSEADDR</code> with <code>SO_EXCLUSIVEADDRUSE</code> while preserving multi-monitor shared <code>TAG_POOLS</code> deduplication.
               </div>
               <div>
                 • <strong>Slideshow &amp; Masonry UI Cleanup</strong>: Removed bottom text description lines (<code>slide_note</code> &amp; <code>masonry_note</code>) from Slideshow and Masonry display settings.
-              </div>
-              <div>
-                • <strong>Conditional 0x052C &amp; Icon Guard</strong>: Probes existing <code>WorkerW</code> without rebroadcasting <code>0x052C</code> and restores <code>SHELLDLL_DefView</code> icon metrics if HDMI DPI changes inflate them.
-              </div>
-              <div>
-                • <strong>Disconnected TV Auto-Hide</strong>: Turning off an HDMI TV immediately hides (<code>SW_HIDE</code>) and pauses its HWND instead of clamping it into a Task View grid.
-              </div>
-              <div>
-                • <strong>Passive Click-Through HWNDs</strong>: Enforces <code>WS_DISABLED</code> + <code>WS_EX_TRANSPARENT</code> + <code>--disable-pinch</code> so wallpaper windows never steal focus or zoom.
               </div>
               <div>
                 • <strong>Hotplug Watchdog &amp; Resync Displays</strong>: Auto-detects 3rd screen hotplugs, coexists with <code>Glass-Pane</code>, and adds a <code>Resync Displays</code> button in Settings &amp; Tray.

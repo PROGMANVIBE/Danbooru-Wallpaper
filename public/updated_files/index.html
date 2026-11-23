@@ -54,6 +54,13 @@
       opacity: 1;
       will-change: opacity;
     }
+    #masonryLoadingOverlay.active {
+      display: flex;
+    }
+    #masonryLoadingOverlay.fade-out {
+      opacity: 0;
+      transition: opacity 0.65s cubic-bezier(0.22, 1, 0.36, 1);
+    }
     #masonryBoxCanvas {
       width: 156px;
       height: 156px;
@@ -219,7 +226,8 @@
       object-fit: contain;
     }
     /* When Edge Fill is set to Black (in Mondrian or Rows), remove blurred/ambient backdrop and show solid #0b0b0d */
-    #stage.mondrian-black-mode .masonry-flip-inner {
+    #stage.mondrian-black-mode .masonry-flip-inner,
+    #stage.masonry-black-mode .masonry-flip-inner {
       background-image: none !important;
       background-color: #0b0b0d !important;
     }
@@ -565,10 +573,20 @@
       return Math.max(1.0, Math.min(45.0, totalCs / 100.0));
     }
 
+    let lastPolaroidViewportW = Math.max(1, window.innerWidth || 1920);
+    let lastPolaroidViewportH = Math.max(1, window.innerHeight || 1080);
+
     function resizePolaroidCanvas(preserveContent = true) {
       const dpr = window.devicePixelRatio || 1;
-      const targetW = Math.max(1, Math.round(window.innerWidth * dpr));
-      const targetH = Math.max(1, Math.round(window.innerHeight * dpr));
+      const curW = Math.max(1, window.innerWidth || 1920);
+      const curH = Math.max(1, window.innerHeight || 1080);
+      const targetW = Math.max(1, Math.round(curW * dpr));
+      const targetH = Math.max(1, Math.round(curH * dpr));
+
+      if (!preserveContent) {
+        lastPolaroidViewportW = curW;
+        lastPolaroidViewportH = curH;
+      }
 
       if (polaroidBaseCanvas.width === targetW && polaroidBaseCanvas.height === targetH) {
         return;
@@ -817,7 +835,7 @@
         try {
           freezeCtx.drawImage(polaroidBaseCanvas, 0, 0, window.innerWidth, window.innerHeight);
         } catch (e) {}
-        const allItems = pendingPolaroidBakes.concat(polaroidItems, fallingItems);
+        const allItems = pendingPolaroidBakes.concat(polaroidItems, fallingItems).sort((a, b) => (a.id || 0) - (b.id || 0));
         for (let i = 0; i < allItems.length; i++) {
           const item = allItems[i];
           if (!item.mediaElement) continue;
@@ -1026,14 +1044,16 @@
         const video = document.createElement('video');
         enforceSilentVideo(video);
         video.preload = 'auto';
+        inFlightMedia.add(video);
         let done = false;
         const finish = () => {
           if (done) return;
           done = true;
+          inFlightMedia.delete(video);
           video.onloadeddata = null;
           video.oncanplay = null;
           video.onerror = null;
-          if (expectedGen !== preloadGeneration || !SCREEN_ENABLED) {
+          if (expectedGen !== preloadGeneration || APP_PAUSED || WALLPAPER_PAUSED || !SCREEN_ENABLED) {
             cleanupMediaNode(video);
             return;
           }
@@ -1058,6 +1078,7 @@
         video.onerror = () => {
           if (done) return;
           done = true;
+          inFlightMedia.delete(video);
           video.onloadeddata = null;
           video.oncanplay = null;
           video.onerror = null;
@@ -1070,8 +1091,10 @@
         const img = new Image();
         img.decoding = 'async';
         img.referrerPolicy = 'no-referrer';
+        inFlightMedia.add(img);
         img.onload = () => {
-          if (expectedGen !== preloadGeneration || !SCREEN_ENABLED) {
+          inFlightMedia.delete(img);
+          if (expectedGen !== preloadGeneration || APP_PAUSED || WALLPAPER_PAUSED || !SCREEN_ENABLED) {
             cleanupMediaNode(img);
             return;
           }
@@ -1092,6 +1115,7 @@
           });
         };
         img.onerror = () => {
+          inFlightMedia.delete(img);
           cleanupMediaNode(img);
           if (typeof onError === 'function') onError();
         };
@@ -1404,16 +1428,19 @@
           const img = new Image();
           img.decoding = 'async';
           img.referrerPolicy = 'no-referrer';
+          const gifAbortController = new AbortController();
+          img._abortController = gifAbortController;
           inFlightMedia.add(img);
 
           // Single-pass GIF fetch: parse exact GIF89a frame-delay loop duration and load directly from local Blob URL
-          fetch(localMediaUrl)
+          fetch(localMediaUrl, { signal: gifAbortController.signal })
             .then(r => {
               if (!r.ok) throw new Error('GIF fetch failed');
               return r.arrayBuffer();
             })
             .then(buf => {
-              if (!inFlightMedia.has(img) || gen !== preloadGeneration || !SCREEN_ENABLED) {
+              img._abortController = null;
+              if (!inFlightMedia.has(img) || gen !== preloadGeneration || APP_PAUSED || WALLPAPER_PAUSED || !SCREEN_ENABLED) {
                 if (inFlightMedia.has(img)) {
                   inFlightMedia.delete(img);
                   activePreloadCount = Math.max(0, activePreloadCount - 1);
@@ -1426,6 +1453,14 @@
               const blobUrl = URL.createObjectURL(new Blob([buf], { type: 'image/gif' }));
               img.dataset.blobUrl = blobUrl;
               img.onload = () => {
+                if (!inFlightMedia.has(img) || gen !== preloadGeneration || APP_PAUSED || WALLPAPER_PAUSED || !SCREEN_ENABLED) {
+                  if (inFlightMedia.has(img)) {
+                    inFlightMedia.delete(img);
+                    activePreloadCount = Math.max(0, activePreloadCount - 1);
+                  }
+                  cleanupMediaNode(img);
+                  return;
+                }
                 if (typeof img.decode === 'function') {
                   img.decode()
                     .then(() => finalizePreloadedMedia(img, localMediaUrl, gen, false, true, true, loopSec, postId, postTags, postArtistTags))
@@ -1438,11 +1473,12 @@
               img.src = blobUrl;
             })
             .catch(() => {
+              img._abortController = null;
               if (img.dataset && img.dataset.blobUrl) {
                 URL.revokeObjectURL(img.dataset.blobUrl);
                 delete img.dataset.blobUrl;
               }
-              if (!inFlightMedia.has(img) || gen !== preloadGeneration || !SCREEN_ENABLED) {
+              if (!inFlightMedia.has(img) || gen !== preloadGeneration || APP_PAUSED || WALLPAPER_PAUSED || !SCREEN_ENABLED) {
                 if (inFlightMedia.has(img)) {
                   inFlightMedia.delete(img);
                   activePreloadCount = Math.max(0, activePreloadCount - 1);
@@ -1451,6 +1487,14 @@
                 return;
               }
               img.onload = () => {
+                if (!inFlightMedia.has(img) || gen !== preloadGeneration || APP_PAUSED || WALLPAPER_PAUSED || !SCREEN_ENABLED) {
+                  if (inFlightMedia.has(img)) {
+                    inFlightMedia.delete(img);
+                    activePreloadCount = Math.max(0, activePreloadCount - 1);
+                  }
+                  cleanupMediaNode(img);
+                  return;
+                }
                 if (typeof img.decode === 'function') {
                   img.decode()
                     .then(() => finalizePreloadedMedia(img, localMediaUrl, gen, false, true, true, 2.5, postId, postTags, postArtistTags))
@@ -1579,6 +1623,10 @@
     function cleanupMediaNode(node) {
       if (!node) return;
       try {
+        if (node._abortController) {
+          try { node._abortController.abort(); } catch (e) {}
+          node._abortController = null;
+        }
         if (node.dataset && node.dataset.blobUrl) {
           URL.revokeObjectURL(node.dataset.blobUrl);
           delete node.dataset.blobUrl;
@@ -4649,6 +4697,12 @@
       }
 
       const reflowPlan = precomputeGroupReflowPlan(chosenTile.groupIndex, chosenTile.id, newAspect, newSizeJitter);
+      if (reflowPlan) {
+        reflowPlan.planSw = Math.max(320, window.innerWidth || 1920);
+        reflowPlan.planSh = Math.max(240, window.innerHeight || 1080);
+        reflowPlan.planGap = Math.max(0, Math.min(10, Number(MASONRY_GAP) || 0));
+        reflowPlan.planLayout = MASONRY_LAYOUT;
+      }
 
       preStagedMasonryPlan = {
         tile: chosenTile,
@@ -4734,9 +4788,20 @@
         }
       }
 
+      const curSw = Math.max(320, window.innerWidth || 1920);
+      const curSh = Math.max(240, window.innerHeight || 1080);
+      const planGeometryValid = Boolean(
+        precomputedReflowPlan &&
+        (precomputedReflowPlan.planSw === undefined || precomputedReflowPlan.planSw === curSw) &&
+        (precomputedReflowPlan.planSh === undefined || precomputedReflowPlan.planSh === curSh) &&
+        (precomputedReflowPlan.planGap === undefined || precomputedReflowPlan.planGap === gap) &&
+        (precomputedReflowPlan.planLayout === undefined || precomputedReflowPlan.planLayout === MASONRY_LAYOUT)
+      );
+
       // Global reshuffle/resize path (Mondrian full-grid / adjacent group resize or Rows full-grid height balance)
       if (
         precomputedReflowPlan &&
+        planGeometryValid &&
         precomputedReflowPlan.scope === 'global' &&
         precomputedReflowPlan.layoutMode === MASONRY_LAYOUT &&
         precomputedReflowPlan.plannedRects
@@ -4854,6 +4919,7 @@
       // Fast path: Use pre-organized local group target rects computed before the flip started
       if (
         precomputedReflowPlan &&
+        planGeometryValid &&
         precomputedReflowPlan.scope === 'local' &&
         precomputedReflowPlan.layoutMode === MASONRY_LAYOUT &&
         precomputedReflowPlan.groupIndex === actualGroupIndex &&
@@ -5846,7 +5912,30 @@
       } else if (DISPLAY_MODE === 'masonry') {
         relayoutMasonryGrid();
       } else {
+        const newW = Math.max(1, window.innerWidth || 1920);
+        const newH = Math.max(1, window.innerHeight || 1080);
+        const scaleX = newW / Math.max(1, lastPolaroidViewportW);
+        const scaleY = newH / Math.max(1, lastPolaroidViewportH);
+        lastPolaroidViewportW = newW;
+        lastPolaroidViewportH = newH;
         resizePolaroidCanvas(true);
+        if (Math.abs(scaleX - 1.0) > 0.001 || Math.abs(scaleY - 1.0) > 0.001) {
+          const liveStacks = [polaroidItems, pendingPolaroidBakes, fallingItems];
+          for (let s = 0; s < liveStacks.length; s++) {
+            const arr = liveStacks[s];
+            for (let i = 0; i < arr.length; i++) {
+              const item = arr[i];
+              if (typeof item.targetX === 'number') item.targetX *= scaleX;
+              if (typeof item.targetY === 'number') item.targetY *= scaleY;
+              if (typeof item.startX === 'number') item.startX *= scaleX;
+              if (typeof item.startY === 'number') item.startY *= scaleY;
+              if (arr === polaroidItems && item.element) {
+                item.element.style.transform =
+                  `translate3d(${item.targetX.toFixed(1)}px, ${item.targetY.toFixed(1)}px, 0) scale(1) rotate(${item.targetRot.toFixed(2)}deg)`;
+              }
+            }
+          }
+        }
         coverageGrid.fill(0);
         coveredCellCount = 0;
         screenFullyCovered = false;

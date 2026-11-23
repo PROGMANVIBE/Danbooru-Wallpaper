@@ -86,6 +86,10 @@ This glossary explains every log prefix and message that can appear in the **Log
 - **What it means**: You toggled the master **PAUSE APPLICATION** button on the Logs tab.
 - **When it happens**: When pausing or resuming the entire application from the Logs tab.
 
+**`[APP] Duplicate launch detected — bringing Settings window to foreground.`**
+- **What it means**: You launched `DanbooruWallpaper.exe` while the application was already running. The duplicate launch signaled the running instance to open and focus the **Application Settings** window and exited cleanly without creating a second tray icon.
+- **When it happens**: Whenever `DanbooruWallpaper.exe` is double-clicked or launched while an instance is already active.
+
 **`[APP] Shutting down application...`**
 - **What it means**: You clicked **Exit** in the system tray menu. All threads, sockets, and WebView2 windows are closing cleanly.
 - **When it happens**: When exiting the program.

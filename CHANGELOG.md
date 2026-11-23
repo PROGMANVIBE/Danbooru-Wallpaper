@@ -8,6 +8,64 @@ All notable changes to the **Danbooru Wallpaper Application** are documented in 
 
 ---
 
+## v2.3.15 — Principal Systems, Concurrency, Rendering & Security Audit Remediation (12 Verified Findings Resolved)
+
+### Summary
+This update resolves 12 verified engineering audit findings across the Win32 desktop host, multi-monitor concurrency, HTTP media proxy, and WebView2 rendering engines. It prevents 64-bit window handle truncation when restoring the Settings window on duplicate launches, eliminates multi-threaded display hotplug race conditions, restores the Masonry Cardboard Box Loading Screen CSS rules, keeps Polaroid layouts and pause snapshots aligned when monitors resize, aborts in-flight GIF downloads immediately when paused, and hardens Cloudflare DoH DNS resolution and HTTP Range media verification.
+
+### Add or Changed
+- **64-Bit Safe Window Focus on Duplicate Launch**: Added explicit 64-bit Win32 `ctypes` type signatures to `user32.ShowWindow` and `user32.SetForegroundWindow` so duplicate `.exe` launches reliably restore and focus the Settings window even when Windows allocates high 64-bit `HWND` handles.
+- **Thread-Safe Multi-Monitor Hotplug Synchronization**: Protected all display topology refreshes and background resyncs with dedicated re-entrant synchronization locks (`TOPOLOGY_LOCK` and `_RESYNC_LOCK`) so simultaneous manual **Resync Displays** clicks and background HDMI hotplug events never collide.
+- **Restored Masonry Cardboard Box Loading Screen & Black Edge Fill Selector**: Added the `#masonryLoadingOverlay.active` and `#masonryLoadingOverlay.fade-out` CSS rules alongside the `#stage.masonry-black-mode` selector alias so the animated cardboard box loading screen displays and fades smoothly whenever Masonry mode initializes.
+- **Polaroid Pause Z-Order & Live Viewport Resize Scaling**: Sorted Polaroid pause snapshots by ascending card creation order (`id`) so paused frames match live screen overlap, and added proportional viewport resize re-projection for live Polaroid stacks when monitor resolution or DPI changes.
+- **Instant GIF Preload Cancellation on Pause**: Attached an `AbortController` to in-flight GIF `fetch()` requests and added pause state guards across GIF and "Previous" button media loaders so pausing a display immediately stops active downloads.
+- **Validated Pre-Staged Masonry Reflow Plans**: Stamped pre-staged Masonry reflow plans with viewport dimensions, gap size, and layout mode so changing gap sliders or resizing a display mid-prestage cleanly falls back to an exact live layout calculation.
+- **Exact HTTP Range Slicing & Mid-Stream Seek Verification**: Ensured small byte-0 HTTP Range probes return the exact requested byte range after 64-byte magic-byte verification, and verified unverified mid-stream MP4 Range seeks via a 64-byte preflight header check while returning true `206 Partial Content`.
+- **Fail-Closed Cloudflare DoH Resolution & Session Thread Safety**: Hardened the standard-library TLS fallback (`DoHSNIHTTPSConnection`) to fail closed if Cloudflare DoH resolution cannot verify a public unicast IPv4 address, and guarded `HybridDoHSession` state transitions with an internal re-entrant lock.
+- **Smarter Page-1 Tag Pool Retry & Polaroid Size Clamping**: Prevented empty Page-1 responses during transient Danbooru errors from skipping directly to Page 2, normalized legacy `scrolldirection` and `searchtags` values on startup, and automatically reconciled Polaroid `Min Size <= Max Size` inputs when saving settings.
+
+### Removed
+- **Unchecked OS DNS Fallback in Standard-Library DoH Transport**: Removed the fallback that allowed `DoHSNIHTTPSConnection.connect()` to dial raw hostnames via OS DNS if Cloudflare DoH resolution returned `None`.
+
+### Technical
+- **Root-Cause Audit & Fixes (`danbooru_service.py`, `index.html`)**:
+  - **[CRITICAL-01] Missing 64-Bit `ctypes` Signatures on `user32.ShowWindow` & `user32.SetForegroundWindow` (`danbooru_service.py`)**: Declared `user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]` (`restype = wintypes.BOOL`) and `user32.SetForegroundWindow.argtypes = [wintypes.HWND]` (`restype = wintypes.BOOL`) so 64-bit `HWND` values above `0x7FFFFFFF` are never truncated to 32-bit `c_int`.
+  - **[CRITICAL-02] Unsynchronized Multi-Thread Mutation of `CONNECTED_SCREENS` & Concurrent Resync Race (`danbooru_service.py`)**: Added `TOPOLOGY_LOCK = threading.RLock()`, `_RESYNC_LOCK = threading.Lock()`, and `get_connected_screens_snapshot()` to serialize `CONNECTED_SCREENS` reads/mutations and prevent overlapping `resync_all_displays_and_desktop()` calls across the watchdog, Tkinter UI, and tray threads.
+  - **[CRITICAL-03] Missing `#masonryLoadingOverlay.active` & `.fade-out` CSS Rules (`index.html`)**: Defined `#masonryLoadingOverlay.active { display: flex; }`, `#masonryLoadingOverlay.fade-out { opacity: 0; transition: opacity 0.65s cubic-bezier(0.22, 1, 0.36, 1); }`, and `#stage.masonry-black-mode .masonry-flip-inner`.
+  - **[HIGH-01] `/media` HTTP Range Byte-0 Over-Delivery & Unverified Mid-Stream Range Downgrade (`danbooru_service.py`)**: Sliced expanded byte-0 Range probes (`bytes=0-N` where `N < 63`) back to `N + 1` bytes with matching `Content-Range: bytes 0-N/total` and `Content-Length` headers after 64-byte magic-byte inspection, and added a 64-byte preflight magic-byte verification request for unverified `range_start > 0` seeks.
+  - **[HIGH-02] Fail-Open OS DNS Fallback in `DoHSNIHTTPSConnection.connect` & `HybridDoHSession` Lock (`danbooru_service.py`)**: Raised ` OSError` when `resolve_hostname_doh()` returns `None` or a non-public IPv4 address, and guarded `HybridDoHSession` session recreation and `.using_curl` transitions with `self._lock = threading.RLock()`.
+  - **[HIGH-03] In-Flight GIF `fetch()` Lack of `AbortController` & Missing Pause Guards (`index.html`)**: Added `AbortController` cancellation in `cleanupMediaNode()` and `APP_PAUSED || WALLPAPER_PAUSED` checks across all GIF preloader Promise and `onload` callbacks.
+  - **[HIGH-04] Polaroid Freeze-Snapshot Z-Order Inversion & Missing Viewport Resize Live-Stack Re-Projection (`index.html`)**: Sorted `allItems` by ascending `item.id` in `renderFreezeSnapshot()` and proportionally scaled `targetX`/`targetY` and `startX`/`startY` of live Polaroid items in `performViewportResizeSync()`.
+  - **[MEDIUM-01] Legacy `scrolldirection` / `searchtags` Normalization, Label Parity & Polaroid `minsize <= maxsize` UI Sync (`danbooru_service.py`)**: Extended `_normalize_project_dict_in_place()`, aligned `NUMERIC_SPECS` labels with `project.json`, and synced the `maxsize` widget variable when `minsize > maxsize` in `SettingsDialog.save_display_settings()`.
+  - **[MEDIUM-02] `fill_tag_pool` Wrap-Around Retry Page-1 Skip on Transient Failure (`danbooru_service.py`)**: Added an empty-posts backoff guard on the wrap-around Page-1 retry so `pool["page"]` remains at `1` with exponential backoff.
+  - **[MEDIUM-03] `createMediaElementFromDescriptor` Untracked Media Elements & Missing Pause Check (`index.html`)**: Registered "Previous" navigation media nodes in `inFlightMedia` and checked `APP_PAUSED || WALLPAPER_PAUSED` on load completion.
+  - **[MEDIUM-04] Pre-Staged Masonry `reflowPlan` Missing Viewport & Gap Validation Stamp (`index.html`)**: Stamped `planSw`, `planSh`, `planGap`, and `planLayout` onto `reflowPlan` in `preStageNextMasonrySwitch()` and validated them in `reflowMasonryGroupWithFlip()`.
+  - **[LOW-01] & [LOW-02] Tkinter Timer Cleanup, Masonry Header Copy & PDH Handle Finalizer (`danbooru_service.py`)**: Cancelled `_nav_cooldown_job` and `_tag_flash_job` in `SettingsDialog.close_dialog()`, updated the Masonry section header to `"MASONRY LAYOUT SETTINGS (UNCROPPED 2D SCALEX FLIP & REFLOW)"`, and added `__del__` / `<Destroy>` cleanup for `AppResourceMonitor.close()`.
+
+---
+
+## v2.3.14 — PyInstaller Single-Instance Enforcement, Duplicate-Launch Settings Handoff & Exclusive Port Binding
+
+### Summary
+This update fixes a bug where double-clicking or launching `DanbooruWallpaper.exe` while the application was already running in the Windows system tray spawned duplicate instances, multiple tray icons, and competing background processes. Now, only a single instance of the application can run at a time—and launching the `.exe` again while it is already running automatically brings the existing **Application Settings** window to the front of your screen and exits the duplicate launch cleanly.
+
+### Add or Changed
+- **Single-Instance Protection for PyInstaller `.exe`**: Prevented duplicate launches of `DanbooruWallpaper.exe` from spawning extra system tray icons or duplicate wallpaper processes, even during rapid double-clicks at startup.
+- **Automatic Settings Window Focus on Second Launch**: Launching `DanbooruWallpaper.exe` while the application is already running in the system tray now signals the running instance to immediately open and focus the **Application Settings** window before closing the duplicate launch.
+- **Exclusive Local Server Port Binding (`127.0.0.1:8088`)**: Hardened the local media proxy server socket on Windows so another process can never bind over port `8088` while the app is running, while preserving 100% of multi-monitor shared tag pool deduplication (`TAG_POOLS`).
+
+### Removed
+- **Permissive Windows `SO_REUSEADDR` Server Socket Flag**: Disabled `allow_reuse_address = True` on Windows so a secondary OS process cannot hijack or share the listening TCP port `127.0.0.1:8088`.
+
+### Technical
+- **Root-Cause Audit & Fixes (`danbooru_service.py`)**:
+  - **Pre-Import Win32 Named Mutex (`enforce_single_instance_or_exit`, `_SINGLE_INSTANCE_MUTEX_HANDLE`)**: Previously, `danbooru_service.py` performed ~400–900ms of heavy third-party imports (`webview`, `curl_cffi`, `pystray`, `PIL`, `tkinter`) with no kernel mutex check at the top of the entry script. Added `enforce_single_instance_or_exit()` at the top of `danbooru_service.py` (immediately after `import os, sys, ctypes`) using `ctypes.WinDLL("kernel32", use_last_error=True)` and `CreateMutexW(None, False, "Local\\DanbooruWallpaper_SingleInstance_Mutex_v1")` with explicit 64-bit `.argtypes` and `.restype`.
+  - **PyInstaller `--onefile` Bootloader Immunity & Handle Retention**: Using a Win32 Named Mutex acquired strictly inside the Python runtime avoids the PyInstaller `--onefile` parent/child bootloader trap (where the C bootloader parent and unpacked Python child share the exact same `DanbooruWallpaper.exe` process name). Retaining `_SINGLE_INSTANCE_MUTEX_HANDLE` and `_SINGLE_INSTANCE_EVENT_HANDLE` in module-level globals prevents Python garbage collection from prematurely closing the kernel handles, and `ctypes.get_last_error() == ERROR_ALREADY_EXISTS (183)` is checked immediately after `CreateMutexW`.
+  - **Kernel Named Event + Local Loopback UX Handoff (`_signal_existing_instance_to_show_settings`, `single_instance_signal_worker_loop`, `_bring_tk_window_to_win32_foreground`)**: When a duplicate launch detects `ERROR_ALREADY_EXISTS (183)` (or `ERROR_ACCESS_DENIED (5)`), it signals the auto-reset Win32 Named Event `"Local\\DanbooruWallpaper_ShowSettings_Event_v1"` via `OpenEventW`/`SetEvent` (which works even during cold-start double-clicks before port `8088` is bound), sends a 0.35s fallback loopback request to `GET http://127.0.0.1:8088/show_settings`, closes its handle, and terminates immediately via `os._exit(0)`. The primary instance's `single_instance_signal_worker_loop` daemon thread wakes on `WaitForSingleObject` and schedules `TK_ROOT.after(0, open_settings_dialog_window)`, using `user32.SetForegroundWindow` and `SW_RESTORE` to elevate the Settings window above Windows Explorer.
+  - **Windows `SO_EXCLUSIVEADDRUSE` Port Hardening (`ReusableThreadingHTTPServer.server_bind`)**: On Windows, `SO_REUSEADDR` (`allow_reuse_address = True`) allows multiple distinct processes to bind to `127.0.0.1:8088` simultaneously without raising `WSAEADDRINUSE`. Changed `allow_reuse_address = (os.name != "nt")` and applied `socket.SO_EXCLUSIVEADDRUSE` in `server_bind()` on Windows. Multi-monitor shared tag pool deduplication (`TAG_POOLS`) is completely unaffected because all monitors (`screen_1`, `screen_2`, etc.) run inside the single primary process and connect as concurrent HTTP clients to the single `ThreadingHTTPServer`.
+
+---
+
 ## v2.3.13 — Removed Slideshow and Masonry Bottom Settings Description Lines
 
 ### Summary

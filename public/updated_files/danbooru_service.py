@@ -51,6 +51,151 @@ import ipaddress
 import webbrowser
 import ctypes
 from ctypes import wintypes
+
+# =============================================================================
+# 0. PRE-IMPORT WIN32 NAMED MUTEX SINGLE-INSTANCE LOCK & UX HANDOFF (PYINSTALLER)
+# =============================================================================
+# Acquired BEFORE heavy third-party imports (webview, curl_cffi, pystray, PIL, tkinter)
+# so rapid double-clicks on the compiled PyInstaller --onefile .exe never race during
+# the ~400-900ms module import window.
+#
+# Why Win32 Named Mutex instead of process-name counting:
+# - In PyInstaller --onefile mode, the outer C bootloader .exe and the unpacked Python
+#   child .exe share the exact same image name (DanbooruWallpaper.exe). Because the C
+#   bootloader never runs Python code, only the active Python runtime calls CreateMutexW,
+#   eliminating false-positive parent/child collisions.
+# - Global references (_SINGLE_INSTANCE_MUTEX_HANDLE, _SINGLE_INSTANCE_EVENT_HANDLE)
+#   are retained at module scope for the entire process lifetime so Python's garbage
+#   collector never closes the kernel handles prematurely.
+_SINGLE_INSTANCE_MUTEX_NAME = "Local\\DanbooruWallpaper_SingleInstance_Mutex_v1"
+_SINGLE_INSTANCE_EVENT_NAME = "Local\\DanbooruWallpaper_ShowSettings_Event_v1"
+_SINGLE_INSTANCE_PORT = 8088
+_SINGLE_INSTANCE_MUTEX_HANDLE = None
+_SINGLE_INSTANCE_EVENT_HANDLE = None
+
+ERROR_ALREADY_EXISTS = 183
+ERROR_ACCESS_DENIED = 5
+EVENT_MODIFY_STATE = 0x0002
+WAIT_OBJECT_0 = 0x00000000
+
+if os.name == "nt":
+    _KERNEL32_SINGLE_INST = ctypes.WinDLL("kernel32", use_last_error=True)
+
+    _KERNEL32_SINGLE_INST.CreateMutexW.argtypes = [
+        wintypes.LPVOID,
+        wintypes.BOOL,
+        wintypes.LPCWSTR,
+    ]
+    _KERNEL32_SINGLE_INST.CreateMutexW.restype = wintypes.HANDLE
+
+    _KERNEL32_SINGLE_INST.CreateEventW.argtypes = [
+        wintypes.LPVOID,
+        wintypes.BOOL,
+        wintypes.BOOL,
+        wintypes.LPCWSTR,
+    ]
+    _KERNEL32_SINGLE_INST.CreateEventW.restype = wintypes.HANDLE
+
+    _KERNEL32_SINGLE_INST.OpenEventW.argtypes = [
+        wintypes.DWORD,
+        wintypes.BOOL,
+        wintypes.LPCWSTR,
+    ]
+    _KERNEL32_SINGLE_INST.OpenEventW.restype = wintypes.HANDLE
+
+    _KERNEL32_SINGLE_INST.SetEvent.argtypes = [wintypes.HANDLE]
+    _KERNEL32_SINGLE_INST.SetEvent.restype = wintypes.BOOL
+
+    _KERNEL32_SINGLE_INST.WaitForSingleObject.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+    ]
+    _KERNEL32_SINGLE_INST.WaitForSingleObject.restype = wintypes.DWORD
+
+    _KERNEL32_SINGLE_INST.ReleaseMutex.argtypes = [wintypes.HANDLE]
+    _KERNEL32_SINGLE_INST.ReleaseMutex.restype = wintypes.BOOL
+
+    _KERNEL32_SINGLE_INST.CloseHandle.argtypes = [wintypes.HANDLE]
+    _KERNEL32_SINGLE_INST.CloseHandle.restype = wintypes.BOOL
+else:
+    _KERNEL32_SINGLE_INST = None
+
+
+def _signal_existing_instance_to_show_settings() -> None:
+    """
+    Signals the already-running primary instance to open and focus the Settings window:
+    1. Kernel Named Event (CreateEventW / OpenEventW + SetEvent): works immediately even
+       if the user rapidly double-clicked the .exe while the first instance is still
+       importing webview/curl_cffi before port 8088 is bound.
+    2. Fast loopback HTTP fallback (GET http://127.0.0.1:8088/show_settings).
+    """
+    if _KERNEL32_SINGLE_INST is not None:
+        evt_handle = None
+        try:
+            evt_handle = _KERNEL32_SINGLE_INST.OpenEventW(
+                EVENT_MODIFY_STATE, False, _SINGLE_INSTANCE_EVENT_NAME
+            )
+            if not evt_handle:
+                evt_handle = _KERNEL32_SINGLE_INST.CreateEventW(
+                    None, False, False, _SINGLE_INSTANCE_EVENT_NAME
+                )
+            if evt_handle:
+                _KERNEL32_SINGLE_INST.SetEvent(evt_handle)
+        except Exception:
+            pass
+        finally:
+            if evt_handle:
+                try:
+                    _KERNEL32_SINGLE_INST.CloseHandle(evt_handle)
+                except Exception:
+                    pass
+
+    try:
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{_SINGLE_INSTANCE_PORT}/show_settings",
+            headers={"Origin": f"http://127.0.0.1:{_SINGLE_INSTANCE_PORT}"},
+            method="GET",
+        )
+        with urllib.request.urlopen(req, timeout=0.35) as resp:
+            resp.read(64)
+    except Exception:
+        pass
+
+
+def enforce_single_instance_or_exit() -> None:
+    """
+    Acquires the session-scoped Win32 Named Mutex before any third-party GUI or network
+    libraries are imported. If another instance already holds the mutex, signals it to
+    bring its Settings window to the foreground and terminates immediately via os._exit(0).
+    """
+    global _SINGLE_INSTANCE_MUTEX_HANDLE, _SINGLE_INSTANCE_EVENT_HANDLE
+    if _KERNEL32_SINGLE_INST is None or _SINGLE_INSTANCE_MUTEX_HANDLE is not None:
+        return
+
+    ctypes.set_last_error(0)
+    mutex_handle = _KERNEL32_SINGLE_INST.CreateMutexW(
+        None, False, _SINGLE_INSTANCE_MUTEX_NAME
+    )
+    last_err = ctypes.get_last_error()
+
+    if not mutex_handle or last_err in (ERROR_ALREADY_EXISTS, ERROR_ACCESS_DENIED):
+        _signal_existing_instance_to_show_settings()
+        if mutex_handle:
+            try:
+                _KERNEL32_SINGLE_INST.CloseHandle(mutex_handle)
+            except Exception:
+                pass
+        os._exit(0)
+
+    _SINGLE_INSTANCE_MUTEX_HANDLE = mutex_handle
+    _SINGLE_INSTANCE_EVENT_HANDLE = _KERNEL32_SINGLE_INST.CreateEventW(
+        None, False, False, _SINGLE_INSTANCE_EVENT_NAME
+    )
+
+
+if __name__ == "__main__":
+    enforce_single_instance_or_exit()
+
 from queue import Queue, Empty
 from collections import deque, OrderedDict
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
@@ -360,6 +505,12 @@ user32.GetShellWindow.restype = wintypes.HWND
 user32.IsIconic.argtypes = [wintypes.HWND]
 user32.IsIconic.restype = wintypes.BOOL
 
+user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+user32.ShowWindow.restype = wintypes.BOOL
+
+user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+user32.SetForegroundWindow.restype = wintypes.BOOL
+
 user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
 user32.GetWindowRect.restype = wintypes.BOOL
 
@@ -396,6 +547,8 @@ def to_signed_long_ptr(val32) -> LONG_PTR:
 
 
 INJECTION_LOCK = threading.Lock()
+TOPOLOGY_LOCK = threading.RLock()
+_RESYNC_LOCK = threading.Lock()
 _KNOWN_DEVICE_TO_SCREEN_ID = {}
 _LAST_INITIALIZED_PROGMAN_HWND = None
 _BASELINE_DESKTOP_ICON_METRICS = None
@@ -475,6 +628,12 @@ def get_display_topology_signature():
     return (vx, vy, vw, vh, mon_sig)
 
 
+def get_connected_screens_snapshot() -> list:
+    """Returns a thread-safe shallow copy of CONNECTED_SCREENS under TOPOLOGY_LOCK."""
+    with TOPOLOGY_LOCK:
+        return [dict(s) for s in (CONNECTED_SCREENS or [])]
+
+
 def refresh_connected_screens_preserving_ids():
     """
     Refreshes CONNECTED_SCREENS while preserving existing screen_id assignments
@@ -484,62 +643,63 @@ def refresh_connected_screens_preserving_ids():
     global CONNECTED_SCREENS
     fresh = enumerate_connected_monitors()
 
-    for s in (CONNECTED_SCREENS or []):
-        dev = s.get("device")
-        sid = s.get("id")
-        if dev and sid:
-            _KNOWN_DEVICE_TO_SCREEN_ID[dev] = sid
+    with TOPOLOGY_LOCK:
+        for s in (CONNECTED_SCREENS or []):
+            dev = s.get("device")
+            sid = s.get("id")
+            if dev and sid:
+                _KNOWN_DEVICE_TO_SCREEN_ID[dev] = sid
 
-    if not _KNOWN_DEVICE_TO_SCREEN_ID:
+        if not _KNOWN_DEVICE_TO_SCREEN_ID:
+            for m in fresh:
+                dev = m.get("device")
+                if dev:
+                    _KNOWN_DEVICE_TO_SCREEN_ID[dev] = m["id"]
+            CONNECTED_SCREENS = fresh
+            return [dict(s) for s in CONNECTED_SCREENS]
+
+        used_ids = set()
+        unmatched = []
+        updated = []
+
+        # Pass 1: Assign preserved screen_ids to all known monitor devices
         for m in fresh:
             dev = m.get("device")
+            matched_id = _KNOWN_DEVICE_TO_SCREEN_ID.get(dev) if dev else None
+            if matched_id and matched_id not in used_ids:
+                used_ids.add(matched_id)
+                idx_num = int(matched_id.split("_")[-1]) if matched_id.split("_")[-1].isdigit() else m["index"]
+                primary_tag = " (Primary)" if m["is_primary"] else ""
+                m["id"] = matched_id
+                m["index"] = idx_num
+                m["name"] = f"Screen {idx_num}"
+                m["label"] = f"Screen {idx_num}: {m['width']}x{m['height']}{primary_tag}"
+                updated.append(m)
+            else:
+                unmatched.append(m)
+
+        # Pass 2: Assign strictly collision-free screen_ids to newly connected monitors (e.g., HDMI TV turning on)
+        reserved_ids = set(used_ids) | set(_KNOWN_DEVICE_TO_SCREEN_ID.values())
+        for m in unmatched:
+            next_idx = 1
+            while f"screen_{next_idx}" in reserved_ids:
+                next_idx += 1
+            new_id = f"screen_{next_idx}"
+            reserved_ids.add(new_id)
+            used_ids.add(new_id)
+            dev = m.get("device")
             if dev:
-                _KNOWN_DEVICE_TO_SCREEN_ID[dev] = m["id"]
-        CONNECTED_SCREENS = fresh
-        return CONNECTED_SCREENS
-
-    used_ids = set()
-    unmatched = []
-    updated = []
-
-    # Pass 1: Assign preserved screen_ids to all known monitor devices
-    for m in fresh:
-        dev = m.get("device")
-        matched_id = _KNOWN_DEVICE_TO_SCREEN_ID.get(dev) if dev else None
-        if matched_id and matched_id not in used_ids:
-            used_ids.add(matched_id)
-            idx_num = int(matched_id.split("_")[-1]) if matched_id.split("_")[-1].isdigit() else m["index"]
+                _KNOWN_DEVICE_TO_SCREEN_ID[dev] = new_id
             primary_tag = " (Primary)" if m["is_primary"] else ""
-            m["id"] = matched_id
-            m["index"] = idx_num
-            m["name"] = f"Screen {idx_num}"
-            m["label"] = f"Screen {idx_num}: {m['width']}x{m['height']}{primary_tag}"
+            m["id"] = new_id
+            m["index"] = next_idx
+            m["name"] = f"Screen {next_idx}"
+            m["label"] = f"Screen {next_idx}: {m['width']}x{m['height']}{primary_tag}"
             updated.append(m)
-        else:
-            unmatched.append(m)
 
-    # Pass 2: Assign strictly collision-free screen_ids to newly connected monitors (e.g., HDMI TV turning on)
-    reserved_ids = set(used_ids) | set(_KNOWN_DEVICE_TO_SCREEN_ID.values())
-    for m in unmatched:
-        next_idx = 1
-        while f"screen_{next_idx}" in reserved_ids:
-            next_idx += 1
-        new_id = f"screen_{next_idx}"
-        reserved_ids.add(new_id)
-        used_ids.add(new_id)
-        dev = m.get("device")
-        if dev:
-            _KNOWN_DEVICE_TO_SCREEN_ID[dev] = new_id
-        primary_tag = " (Primary)" if m["is_primary"] else ""
-        m["id"] = new_id
-        m["index"] = next_idx
-        m["name"] = f"Screen {next_idx}"
-        m["label"] = f"Screen {next_idx}: {m['width']}x{m['height']}{primary_tag}"
-        updated.append(m)
-
-    updated.sort(key=lambda s: s["index"])
-    CONNECTED_SCREENS = updated
-    return CONNECTED_SCREENS
+        updated.sort(key=lambda s: s["index"])
+        CONNECTED_SCREENS = updated
+        return [dict(s) for s in CONNECTED_SCREENS]
 
 
 def find_desktop_listview_hwnd(progman=None):
@@ -881,7 +1041,7 @@ def sync_all_screens_z_order_and_geometry(target_screen_id=None, force_reattach=
             else HWND_TOP
         )
 
-        screens_by_id = {s["id"]: s for s in CONNECTED_SCREENS}
+        screens_by_id = {s["id"]: s for s in get_connected_screens_snapshot()}
 
         for sid, hwnd in list(DESKTOP_HWNDS.items()):
             if not hwnd or not user32.IsWindow(hwnd):
@@ -1684,7 +1844,7 @@ LOG_GLOSSARY_ENTRIES = [
     ("[WEBVIEW]", "Synchronization of per-screen display properties, modes (Scroll, Polaroid, Slideshow, Masonry), and enabled states to WebView2."),
     ("[WIN32]", "Native Windows API desktop window attachment (Progman / WorkerW / SHELLDLL_DefView) and multi-monitor Z-order management."),
     ("[POLAROID]", "Polaroid mode actions such as triggering the 30-second cooldown Fill Screen burst."),
-    ("[APP]", "Application-wide master pause/resume state changes and clean shutdown sequences."),
+    ("[APP]", "Application-wide master pause/resume state changes, single-instance duplicate-launch Settings window handoff, and clean shutdown sequences."),
     ("[PING]", "Periodic heartbeat summary confirming active WebView2 wallpaper clients are polling /epoch."),
     ("[SECURITY]", "Localhost origin verification, URL path/PHP filtering, redirect host pinning, and binary magic-byte signature enforcement."),
     ("[PERF]", "Real-time CPU, RAM, and GPU telemetry events from the Resource Graph performance monitor."),
@@ -1950,14 +2110,18 @@ class DoHSNIHTTPSConnection(http.client.HTTPSConnection):
         super().__init__(host, port=port, **kwargs)
 
     def connect(self):
-        target_host = self._tunnel_host if self._tunnel_host else self.host
+        target_host = (self._tunnel_host if self._tunnel_host else self.host or "").lower()
         target_port = self._tunnel_port if self._tunnel_host else self.port
 
-        connect_ip = resolve_hostname_doh(target_host) if target_host in ALLOWED_MEDIA_HOSTS else ""
-        dial_host = connect_ip if connect_ip else target_host
+        if target_host not in ALLOWED_MEDIA_HOSTS:
+            raise PermissionError(f"Blocked outbound connection to unauthorized host: {target_host}")
+
+        connect_ip = resolve_hostname_doh(target_host)
+        if not connect_ip or not is_public_unicast_ipv4(connect_ip):
+            raise OSError(f"Secure DoH/DNS resolution failed or returned non-public IPv4 for {target_host}")
 
         self.sock = socket.create_connection(
-            (dial_host, target_port),
+            (connect_ip, target_port),
             self.timeout,
             self.source_address,
         )
@@ -2150,69 +2314,80 @@ class HybridDoHSession:
     if `curl_cffi` raises any initialization or per-request error.
     """
     def __init__(self, headers: dict = None, auth: tuple = None):
+        self._lock = threading.RLock()
         self.headers = dict(headers or {})
         self.auth = auth
         self._stdlib_session = StdlibDoHSession()
         self._stdlib_session.headers.update(self.headers)
         self._stdlib_session.auth = self.auth
         self._curl_session = None
+        self._last_resolve_tuple = ()
         self._init_curl_session()
 
     def _init_curl_session(self):
         global CURL_CFFI_AVAILABLE
         if not CURL_CFFI_AVAILABLE or curl_requests is None:
             return
-        try:
-            base_kwargs = {"impersonate": "chrome"}
-            if CurlHttpVersion is not None:
-                base_kwargs["http_version"] = CurlHttpVersion.V2_0
+        with self._lock:
+            try:
+                base_kwargs = {"impersonate": "chrome"}
+                if CurlHttpVersion is not None:
+                    base_kwargs["http_version"] = CurlHttpVersion.V2_0
 
-            c_sess = None
-            if CurlOpt is not None:
-                with DOH_LOCK:
-                    now = time.time()
-                    cached_entries = [
-                        f"{h}:{p}:{ip}"
-                        for h, (ip, exp) in DOH_CACHE.items()
-                        if exp > now and ip
-                        for p in (443, 80)
-                    ]
-                if cached_entries:
-                    try:
-                        c_sess = curl_requests.Session(
-                            **base_kwargs,
-                            curl_options={CurlOpt.RESOLVE: cached_entries},
-                        )
-                    except TypeError:
-                        c_sess = None
+                c_sess = None
+                if CurlOpt is not None:
+                    with DOH_LOCK:
+                        now = time.time()
+                        cached_entries = [
+                            f"{h}:{p}:{ip}"
+                            for h, (ip, exp) in DOH_CACHE.items()
+                            if exp > now and ip and is_public_unicast_ipv4(ip)
+                            for p in (443, 80)
+                        ]
+                    if cached_entries:
+                        try:
+                            c_sess = curl_requests.Session(
+                                **base_kwargs,
+                                curl_options={CurlOpt.RESOLVE: cached_entries},
+                            )
+                            self._last_resolve_tuple = tuple(sorted(cached_entries))
+                        except TypeError:
+                            c_sess = None
 
-            if c_sess is None:
-                c_sess = curl_requests.Session(**base_kwargs)
+                if c_sess is None:
+                    c_sess = curl_requests.Session(**base_kwargs)
 
-            c_sess.headers.update(self.headers)
-            self._curl_session = c_sess
-        except Exception as e:
-            log_event("auth", f"curl_cffi session init failed ({e}); falling back to stdlib DoH+SNI transport.")
-            CURL_CFFI_AVAILABLE = False
-            self._curl_session = None
+                c_sess.headers.update(self.headers)
+                self._curl_session = c_sess
+            except Exception as e:
+                log_event("auth", f"curl_cffi session init failed ({e}); falling back to stdlib DoH+SNI transport.")
+                CURL_CFFI_AVAILABLE = False
+                self._curl_session = None
 
     def _apply_doh_to_curl_session(self, target_host: str):
-        """Resolves target_host via Cloudflare DoH and attaches CURLOPT_RESOLVE to the session if supported."""
+        """Resolves target_host via Cloudflare DoH and attaches CURLOPT_RESOLVE to the session in a thread-safe manner."""
         if not target_host or target_host not in ALLOWED_MEDIA_HOSTS:
             return
         ip_addr = resolve_hostname_doh(target_host)
-        if not ip_addr or self._curl_session is None or CurlOpt is None:
+        if not ip_addr or not is_public_unicast_ipv4(ip_addr):
+            raise OSError(f"Secure DoH/DNS resolution failed or returned non-public IPv4 for {target_host}")
+        if self._curl_session is None or CurlOpt is None:
             return
         resolve_entries = build_curl_resolve_list(ALLOWED_MEDIA_HOSTS)
         if not resolve_entries:
             return
-        try:
-            if hasattr(self._curl_session, "_curl_options") and isinstance(self._curl_session._curl_options, dict):
-                self._curl_session._curl_options[CurlOpt.RESOLVE] = resolve_entries
-            elif hasattr(self._curl_session, "curl_options") and isinstance(self._curl_session.curl_options, dict):
-                self._curl_session.curl_options[CurlOpt.RESOLVE] = resolve_entries
-        except Exception:
-            pass
+        resolve_sig = tuple(sorted(resolve_entries))
+        with self._lock:
+            if self._curl_session is None:
+                return
+            try:
+                if hasattr(self._curl_session, "_curl_options") and isinstance(self._curl_session._curl_options, dict):
+                    self._curl_session._curl_options[CurlOpt.RESOLVE] = resolve_entries
+                elif hasattr(self._curl_session, "curl_options") and isinstance(self._curl_session.curl_options, dict):
+                    self._curl_session.curl_options[CurlOpt.RESOLVE] = resolve_entries
+                self._last_resolve_tuple = resolve_sig
+            except Exception:
+                pass
 
     def get(
         self,
@@ -2241,12 +2416,14 @@ class HybridDoHSession:
                 merged_req_headers.update(headers)
 
             resp = None
-            if self._curl_session is not None and CURL_CFFI_AVAILABLE:
+            with self._lock:
+                c_sess = self._curl_session if CURL_CFFI_AVAILABLE else None
+            if c_sess is not None:
                 try:
                     self._apply_doh_to_curl_session(target_host)
 
                     # Disable unchecked automatic redirects; validate each hop manually
-                    resp = self._curl_session.get(
+                    resp = c_sess.get(
                         current_url,
                         params=current_params,
                         headers=merged_req_headers,
@@ -2260,12 +2437,15 @@ class HybridDoHSession:
                         "auth",
                         f"curl_cffi request failed ({e}); automatically switching to stdlib TLS 1.3 + DoH SNI fallback."
                     )
-                    CURL_CFFI_AVAILABLE = False
-                    try:
-                        self._curl_session.close()
-                    except Exception:
-                        pass
-                    self._curl_session = None
+                    with self._lock:
+                        CURL_CFFI_AVAILABLE = False
+                        old_sess = self._curl_session
+                        self._curl_session = None
+                    if old_sess is not None:
+                        try:
+                            old_sess.close()
+                        except Exception:
+                            pass
 
             if resp is None:
                 resp = self._stdlib_session.get(
@@ -2308,15 +2488,18 @@ class HybridDoHSession:
         raise RuntimeError("Maximum redirect hops exceeded")
 
     def close(self):
-        if self._curl_session is not None:
+        with self._lock:
+            old_curl = self._curl_session
+            self._curl_session = None
+            old_stdlib = self._stdlib_session
+        if old_curl is not None:
             try:
-                self._curl_session.close()
+                old_curl.close()
             except Exception:
                 pass
-            self._curl_session = None
-        if self._stdlib_session is not None:
+        if old_stdlib is not None:
             try:
-                self._stdlib_session.close()
+                old_stdlib.close()
             except Exception:
                 pass
 
@@ -2442,6 +2625,13 @@ def _normalize_masonry_edge_fill_value(val: str) -> str:
     return "blur"
 
 
+def _normalize_scroll_direction_value(val: str) -> str:
+    v = str(val or "left").strip().lower()
+    if v in ("left", "right", "up", "down"):
+        return v
+    return "left"
+
+
 def _normalize_vsync_value(val) -> bool:
     if isinstance(val, bool):
         return val
@@ -2494,12 +2684,16 @@ def _normalize_project_dict_in_place(data: dict) -> dict:
             saved_val = general_props[k].get("value", v["value"])
             if k == "displaymode":
                 saved_val = _normalize_display_mode_value(saved_val)
+            elif k == "scrolldirection":
+                saved_val = _normalize_scroll_direction_value(saved_val)
             elif k == "masonrylayout":
                 saved_val = _normalize_masonry_layout_value(saved_val)
             elif k == "masonryedgefill":
                 saved_val = _normalize_masonry_edge_fill_value(saved_val)
             elif k in ("vsync", "pausefullscreen"):
                 saved_val = _normalize_vsync_value(saved_val)
+            elif k == "searchtags":
+                saved_val = str(saved_val if saved_val is not None else v["value"]).strip() or v["value"]
             merged_meta = json.loads(json.dumps(v))
             merged_meta["value"] = saved_val
             general_props[k] = merged_meta
@@ -2525,12 +2719,16 @@ def _normalize_project_dict_in_place(data: dict) -> dict:
                 saved_val = s_props[k].get("value", base_default["value"])
                 if k == "displaymode":
                     saved_val = _normalize_display_mode_value(saved_val)
+                elif k == "scrolldirection":
+                    saved_val = _normalize_scroll_direction_value(saved_val)
                 elif k == "masonrylayout":
                     saved_val = _normalize_masonry_layout_value(saved_val)
                 elif k == "masonryedgefill":
                     saved_val = _normalize_masonry_edge_fill_value(saved_val)
                 elif k in ("vsync", "pausefullscreen"):
                     saved_val = _normalize_vsync_value(saved_val)
+                elif k == "searchtags":
+                    saved_val = str(saved_val if saved_val is not None else base_default["value"]).strip() or base_default["value"]
                 merged_meta = json.loads(json.dumps(v))
                 merged_meta["value"] = saved_val
                 s_props[k] = merged_meta
@@ -2787,7 +2985,7 @@ def set_screen_tags_in_project_json(screen_id: str, new_tags: str):
 
 def is_any_enabled_screen_using_pool(pool_key: str) -> bool:
     """Returns True if at least one enabled and unpaused screen is currently configured with tags matching pool_key."""
-    for s in CONNECTED_SCREENS:
+    for s in get_connected_screens_snapshot():
         sid = s["id"]
         sc_cfg = get_screen_config(sid)
         if not sc_cfg.get("enabled", False):
@@ -3384,6 +3582,15 @@ def fill_tag_pool(raw_tags: str, wait_if_busy: bool = False, force_reset: bool =
             posts = fetch_danbooru_page(target_tags, target_page)
             if APP_PAUSED:
                 return
+            if not posts:
+                with DATA_LOCK:
+                    _, pool = get_or_create_tag_pool_locked(target_tags)
+                    pool["consecutive_failures"] += 1
+                    backoff = min(30, max(5, 2 ** pool["consecutive_failures"]))
+                    pool["next_allowed_fetch_time"] = time.time() + backoff
+                    pool["last_status"] = {"status": "error", "page": 1, "count": 0}
+                log_event("error", f"No posts found on wrap-around Page 1 for '{target_tags}'. Backing off {backoff}s...")
+                return
 
         new_items = []
         skipped_large_mp4 = 0
@@ -3490,7 +3697,7 @@ def ensure_all_enabled_screen_pools_populated(force_reset: bool = False):
     if APP_PAUSED:
         return
     seen_pools = set()
-    for s in CONNECTED_SCREENS:
+    for s in get_connected_screens_snapshot():
         sid = s["id"]
         sc_cfg = get_screen_config(sid)
         if not sc_cfg.get("enabled", False):
@@ -3522,7 +3729,23 @@ def ensure_all_enabled_screen_pools_populated(force_reset: bool = False):
 # 5. HTTP SERVER & LOCAL /media STREAMING PROXY (HYBRID HTTP/2 + DoH)
 # =============================================================================
 class ReusableThreadingHTTPServer(ThreadingHTTPServer):
-    allow_reuse_address = True
+    """
+    Multi-threaded local HTTP proxy server bound exclusively to 127.0.0.1:8088.
+    - On Windows, sets allow_reuse_address = False and applies SO_EXCLUSIVEADDRUSE
+      before binding so a second OS process can never silently bind over port 8088.
+    - All connected monitors (screen_1, screen_2, etc.) inside the running process
+      connect concurrently as HTTP clients to this single server and share the
+      deduplicated in-memory TAG_POOLS dictionary without extra API fetches.
+    """
+    allow_reuse_address = (os.name != "nt")
+
+    def server_bind(self):
+        if os.name == "nt" and hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            try:
+                self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+            except OSError:
+                pass
+        super().server_bind()
 
 
 class ProxyHandler(BaseHTTPRequestHandler):
@@ -3563,6 +3786,25 @@ class ProxyHandler(BaseHTTPRequestHandler):
         path_only = parsed_url.path
         query_params = urllib.parse.parse_qs(parsed_url.query)
         screen_id = query_params.get("screen", ["screen_1"])[0]
+
+        if path_only == "/show_settings":
+            if self.client_address[0] in ("127.0.0.1", "::1") and TK_ROOT:
+                try:
+                    TK_ROOT.after(0, open_settings_dialog_window)
+                except Exception:
+                    pass
+            try:
+                ok_body = b'{"ok":true}'
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(ok_body)))
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Connection", "close")
+                self.end_headers()
+                self.wfile.write(ok_body)
+            except Exception:
+                pass
+            return
 
         if path_only in ("/", "/index.html"):
             try:
@@ -3908,6 +4150,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
             }
             forwarded_range = None
             range_start = 0
+            client_requested_short_end = None
             if is_mp4:
                 client_range = (self.headers.get("Range") or "").strip()
                 m_range = re.match(r"^bytes=(\d+)-(\d*)$", client_range)
@@ -3916,13 +4159,48 @@ class ProxyHandler(BaseHTTPRequestHandler):
                     range_end_str = m_range.group(2)
                     if range_start == 0:
                         if range_end_str and int(range_end_str) < 63:
+                            client_requested_short_end = int(range_end_str)
                             forwarded_range = "bytes=0-65535"
                         else:
                             forwarded_range = client_range
                         req_headers["Range"] = forwarded_range
-                    elif is_mp4_url_verified(target_url):
-                        forwarded_range = client_range
-                        req_headers["Range"] = forwarded_range
+                    else:
+                        if not is_mp4_url_verified(target_url):
+                            # Preflight byte-0 magic-byte verification so mid-stream Range requests stay 206 Partial Content
+                            probe_resp = None
+                            try:
+                                probe_headers = dict(req_headers)
+                                probe_headers["Range"] = "bytes=0-63"
+                                probe_resp = get_http2_session().get(
+                                    target_url,
+                                    headers=probe_headers,
+                                    stream=True,
+                                    timeout=10,
+                                    allow_redirects=True,
+                                )
+                                if probe_resp.status_code in (200, 206):
+                                    probe_buf = bytearray()
+                                    for p_chunk in iter_response_chunks(probe_resp, chunk_size=64):
+                                        if p_chunk:
+                                            probe_buf.extend(p_chunk)
+                                            if len(probe_buf) >= 32:
+                                                break
+                                    p_ok, p_mime, _ = verify_media_magic_bytes(bytes(probe_buf), is_range_continuation=False)
+                                    if p_ok and p_mime == "video/mp4":
+                                        mark_mp4_url_verified(target_url)
+                            except Exception:
+                                pass
+                            finally:
+                                if probe_resp is not None:
+                                    try:
+                                        probe_resp.close()
+                                    except Exception:
+                                        pass
+                        if is_mp4_url_verified(target_url):
+                            forwarded_range = client_range
+                            req_headers["Range"] = forwarded_range
+                        else:
+                            range_start = 0
 
             headers_sent = False
             resp = None
@@ -3947,6 +4225,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 content_len_str = resp.headers.get("Content-Length") or resp.headers.get("content-length")
                 content_range = resp.headers.get("Content-Range") or resp.headers.get("content-range")
 
+                total_res_bytes = None
                 if content_range:
                     m_total = re.search(r"/(\d+)$", content_range.strip())
                     if m_total:
@@ -4022,6 +4301,24 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 if not is_range_cont and range_start == 0 and len(first_chunk) >= 32 and verified_mime == "video/mp4":
                     mark_mp4_url_verified(target_url)
 
+                # If the client sent a tiny byte-0 probe (e.g. bytes=0-1) that we expanded to bytes=0-65535
+                # for magic-byte verification, slice the response back to the exact range requested by the client.
+                slice_to_short_probe = False
+                if client_requested_short_end is not None and status_code in (200, 206):
+                    desired_len = client_requested_short_end + 1
+                    first_chunk = first_chunk[:desired_len]
+                    actual_end = max(0, len(first_chunk) - 1)
+                    if total_res_bytes is None and content_len_str and status_code == 200:
+                        try:
+                            total_res_bytes = int(content_len_str)
+                        except ValueError:
+                            total_res_bytes = None
+                    if total_res_bytes is not None:
+                        status_code = 206
+                        content_range = f"bytes 0-{actual_end}/{total_res_bytes}"
+                        content_len_str = str(len(first_chunk))
+                        slice_to_short_probe = True
+
                 self.send_response(status_code)
                 self.send_header("Content-Type", verified_mime)
                 self.send_header("Content-Disposition", "inline")
@@ -4044,6 +4341,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
                     log_event("proxy", f"Aborted stream exceeding size cap ({max_allowed_bytes:,} bytes): {target_url}")
                     return
                 self.wfile.write(first_chunk)
+                if slice_to_short_probe:
+                    return
 
                 for chunk in chunk_iter:
                     if APP_PAUSED or not chunk:
@@ -4433,12 +4732,19 @@ class AppResourceMonitor:
             self._pdh_available = False
 
     def close(self):
-        if self._pdh_available and self._pdh_dll and self._pdh_query:
+        if getattr(self, "_pdh_available", False) and getattr(self, "_pdh_dll", None) and getattr(self, "_pdh_query", None):
             try:
                 self._pdh_dll.PdhCloseQuery(self._pdh_query)
             except Exception:
                 pass
             self._pdh_available = False
+            self._pdh_query = ctypes.c_void_p(0)
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
 
     def _enumerate_app_process_tree(self) -> tuple[set[int], int]:
         """
@@ -4925,8 +5231,17 @@ class ResourceGraphDialog(tk.Toplevel):
 
         self.apply_theme()
         self.bind("<Escape>", lambda e: self.close_resource_graph())
+        self.bind("<Destroy>", self._on_widget_destroy)
         self.graph_canvas.bind("<Configure>", lambda e: self._redraw_all_graphs())
         self._tick_telemetry()
+
+    def _on_widget_destroy(self, event=None):
+        if event is not None and event.widget is self:
+            self.is_open = False
+            try:
+                self.monitor.close()
+            except Exception:
+                pass
 
     def select_resource_tab(self, tab_key: str):
         self.selected_tab = tab_key
@@ -5352,7 +5667,7 @@ class SettingsDialog(tk.Toplevel):
             "precision": 0,
         },
         "slideshowfade": {
-            "label": "Fade Transition (0 – 10 [0s–1s]):",
+            "label": "Fade Transition (0 – 10 [0s – 1.0s]):",
             "min": 0.0,
             "max": 10.0,
             "default": 5.0,
@@ -5360,7 +5675,7 @@ class SettingsDialog(tk.Toplevel):
             "precision": 1,
         },
         "slideshowduration": {
-            "label": "Display Duration (0 – 600 s):",
+            "label": "Slide Display Time (0 – 600 s):",
             "min": 0,
             "max": 600,
             "default": 10,
@@ -5408,6 +5723,8 @@ class SettingsDialog(tk.Toplevel):
         self._saved_marquee_job = None
         self._saved_marquee_items = []
         self._toast_hide_job = None
+        self._nav_cooldown_job = None
+        self._tag_flash_job = None
         self._last_applied_tags_by_screen = {}
         self._suggest_req_id = 0
         self._nav_cooldown_active = False
@@ -5740,11 +6057,11 @@ class SettingsDialog(tk.Toplevel):
         pad_frame.pack(fill="both", expand=True, padx=16, pady=10)
         self._themed_frames.append(pad_frame)
 
-        global CONNECTED_SCREENS, _RUNTIME_LAST_SELECTED_SCREEN_ID
-        refresh_connected_screens_preserving_ids()
-        self.screen_map = {s["label"]: s["id"] for s in CONNECTED_SCREENS}
-        id_to_label = {s["id"]: s["label"] for s in CONNECTED_SCREENS}
-        screen_labels = [s["label"] for s in CONNECTED_SCREENS]
+        global _RUNTIME_LAST_SELECTED_SCREEN_ID
+        screens_snap = refresh_connected_screens_preserving_ids()
+        self.screen_map = {s["label"]: s["id"] for s in screens_snap}
+        id_to_label = {s["id"]: s["label"] for s in screens_snap}
+        screen_labels = [s["label"] for s in screens_snap]
 
         initial_screen_label = screen_labels[0]
         if _RUNTIME_LAST_SELECTED_SCREEN_ID and _RUNTIME_LAST_SELECTED_SCREEN_ID in id_to_label:
@@ -6398,7 +6715,7 @@ class SettingsDialog(tk.Toplevel):
 
         masonry_hdr = tk.Label(
             self.masonry_section_frame,
-            text="MASONRY LAYOUT SETTINGS (UNCROPPED 3D Y-AXIS FLIP & REFLOW)",
+            text="MASONRY LAYOUT SETTINGS (UNCROPPED 2D SCALEX FLIP & REFLOW)",
             font=("Segoe UI", 8, "bold"), fg=self.text_muted, bg=self.bg_base
         )
         masonry_hdr.pack(anchor="w", pady=(4, 4))
@@ -6731,6 +7048,7 @@ class SettingsDialog(tk.Toplevel):
                 ensure_screen_tag_pool_populated_async(sid, force_reset=False)
 
     def _restore_nav_buttons_after_cooldown(self):
+        self._nav_cooldown_job = None
         self._nav_cooldown_active = False
         if not self.is_open:
             return
@@ -6752,7 +7070,12 @@ class SettingsDialog(tk.Toplevel):
         pal = THEME_PALETTES[CURRENT_THEME]
         self.prev_btn.configure(fg="#0067c0", bg=pal["flash_bg"], cursor="arrow")
         self.next_btn.configure(fg=self.text_muted, cursor="arrow")
-        self.after(1000, self._restore_nav_buttons_after_cooldown)
+        if self._nav_cooldown_job is not None:
+            try:
+                self.after_cancel(self._nav_cooldown_job)
+            except Exception:
+                pass
+        self._nav_cooldown_job = self.after(1000, self._restore_nav_buttons_after_cooldown)
 
     def next_media_for_selected_screen(self):
         """Immediately plays the next queued file on the currently selected screen with a 1.0s stress-protection cooldown."""
@@ -6765,7 +7088,12 @@ class SettingsDialog(tk.Toplevel):
         pal = THEME_PALETTES[CURRENT_THEME]
         self.next_btn.configure(fg="#0067c0", bg=pal["flash_bg"], cursor="arrow")
         self.prev_btn.configure(fg=self.text_muted, cursor="arrow")
-        self.after(1000, self._restore_nav_buttons_after_cooldown)
+        if self._nav_cooldown_job is not None:
+            try:
+                self.after_cancel(self._nav_cooldown_job)
+            except Exception:
+                pass
+        self._nav_cooldown_job = self.after(1000, self._restore_nav_buttons_after_cooldown)
 
     def _cancel_auto_tag_refresh_timer(self):
         if self._auto_tag_refresh_job is not None:
@@ -6827,9 +7155,15 @@ class SettingsDialog(tk.Toplevel):
             if force_refresh or is_auto:
                 self.refresh_btn.configure(fg="#0067c0")
             self.tag_input.configure(bg=pal["flash_bg"])
-            self.after(
+            if self._tag_flash_job is not None:
+                try:
+                    self.after_cancel(self._tag_flash_job)
+                except Exception:
+                    pass
+            self._tag_flash_job = self.after(
                 180,
                 lambda: (
+                    setattr(self, "_tag_flash_job", None),
                     self.refresh_btn.configure(fg=self.text_dark),
                     self.tag_input.configure(bg=self.input_bg),
                 )
@@ -7750,13 +8084,14 @@ class SettingsDialog(tk.Toplevel):
         Live-updates the Select Screen combobox when an HDMI TV or display is connected
         or disconnected while the Settings window is open.
         """
-        global CONNECTED_SCREENS, _RUNTIME_LAST_SELECTED_SCREEN_ID
+        global _RUNTIME_LAST_SELECTED_SCREEN_ID
         if not self.is_open or not hasattr(self, "screen_combo"):
             return
         prev_sid = self._get_current_selected_screen_id()
-        self.screen_map = {s["label"]: s["id"] for s in CONNECTED_SCREENS}
-        id_to_label = {s["id"]: s["label"] for s in CONNECTED_SCREENS}
-        screen_labels = [s["label"] for s in CONNECTED_SCREENS]
+        screens_snap = get_connected_screens_snapshot()
+        self.screen_map = {s["label"]: s["id"] for s in screens_snap}
+        id_to_label = {s["id"]: s["label"] for s in screens_snap}
+        screen_labels = [s["label"] for s in screens_snap]
         if not screen_labels:
             return
         self.screen_combo.configure(values=screen_labels)
@@ -8064,6 +8399,23 @@ class SettingsDialog(tk.Toplevel):
                 if clamp_entries:
                     self.prop_entries[key].delete(0, tk.END)
                     self.prop_entries[key].insert(0, self._format_numeric_value(key, clamped))
+
+            min_val = s_props.get("minsize", {}).get("value", 220)
+            max_val = s_props.get("maxsize", {}).get("value", 440)
+            if isinstance(min_val, (int, float)) and isinstance(max_val, (int, float)) and min_val > max_val:
+                reconciled_min = self._clamp_numeric_value("minsize", max_val)
+                reconciled_max = self._clamp_numeric_value("maxsize", min_val)
+                if reconciled_min > reconciled_max:
+                    reconciled_min = reconciled_max
+                s_props["minsize"]["value"] = reconciled_min
+                s_props["maxsize"]["value"] = reconciled_max
+                self.prop_vars["minsize"].set(float(reconciled_min))
+                self.prop_vars["maxsize"].set(float(reconciled_max))
+                if clamp_entries:
+                    self.prop_entries["minsize"].delete(0, tk.END)
+                    self.prop_entries["minsize"].insert(0, self._format_numeric_value("minsize", reconciled_min))
+                    self.prop_entries["maxsize"].delete(0, tk.END)
+                    self.prop_entries["maxsize"].insert(0, self._format_numeric_value("maxsize", reconciled_max))
         finally:
             self._syncing_controls = False
 
@@ -8400,6 +8752,18 @@ class SettingsDialog(tk.Toplevel):
                 self.after_cancel(self._fill_timer_job)
             except Exception:
                 pass
+        if getattr(self, "_nav_cooldown_job", None):
+            try:
+                self.after_cancel(self._nav_cooldown_job)
+            except Exception:
+                pass
+            self._nav_cooldown_job = None
+        if getattr(self, "_tag_flash_job", None):
+            try:
+                self.after_cancel(self._tag_flash_job)
+            except Exception:
+                pass
+            self._tag_flash_job = None
         self._hide_all_popups()
         try:
             self.suggest_dropdown.destroy()
@@ -8434,15 +8798,36 @@ def save_credentials_from_settings(user, uid, key):
         ensure_all_enabled_screen_pools_populated(force_reset=True)
 
 
+def _bring_tk_window_to_win32_foreground(tk_win) -> None:
+    """
+    Elevates a Tkinter Toplevel window above Windows Explorer when triggered by the
+    system tray or a duplicate .exe launch handoff.
+    """
+    if not tk_win:
+        return
+    try:
+        tk_win.deiconify()
+        tk_win.attributes("-topmost", True)
+        tk_win.lift()
+        tk_win.focus_force()
+        tk_win.update_idletasks()
+        if os.name == "nt":
+            hwnd = tk_win.winfo_id()
+            if hwnd:
+                if user32.IsIconic(hwnd):
+                    user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+                user32.SetForegroundWindow(hwnd)
+    except Exception:
+        pass
+
+
 def open_settings_dialog_window():
     global SETTINGS_DIALOG_INSTANCE
     if not TK_ROOT:
         return
     if SETTINGS_DIALOG_INSTANCE and getattr(SETTINGS_DIALOG_INSTANCE, "is_open", False):
         try:
-            SETTINGS_DIALOG_INSTANCE.deiconify()
-            SETTINGS_DIALOG_INSTANCE.lift()
-            SETTINGS_DIALOG_INSTANCE.focus_force()
+            _bring_tk_window_to_win32_foreground(SETTINGS_DIALOG_INSTANCE)
             return
         except tk.TclError:
             pass
@@ -8456,6 +8841,41 @@ def open_settings_dialog_window():
     SETTINGS_DIALOG_INSTANCE = SettingsDialog(
         TK_ROOT, save_credentials_from_settings, initial_values=initial
     )
+    _bring_tk_window_to_win32_foreground(SETTINGS_DIALOG_INSTANCE)
+
+
+def single_instance_signal_worker_loop():
+    """
+    Daemon thread that listens on the kernel Named Event (_SINGLE_INSTANCE_EVENT_HANDLE)
+    signaled whenever the user launches a duplicate DanbooruWallpaper.exe instance.
+    Immediately opens and focuses the Settings window on the primary instance.
+    """
+    if _KERNEL32_SINGLE_INST is None or not _SINGLE_INSTANCE_EVENT_HANDLE:
+        return
+
+    while IS_RUNNING:
+        try:
+            wait_res = _KERNEL32_SINGLE_INST.WaitForSingleObject(
+                _SINGLE_INSTANCE_EVENT_HANDLE, 400
+            )
+            if not IS_RUNNING:
+                break
+            if wait_res == WAIT_OBJECT_0:
+                # If the user rapidly double-clicked at cold startup, wait briefly for TK_ROOT to initialize
+                wait_deadline = time.time() + 5.0
+                while TK_ROOT is None and IS_RUNNING and time.time() < wait_deadline:
+                    time.sleep(0.05)
+                log_event(
+                    "app",
+                    "Duplicate launch detected — bringing Settings window to foreground.",
+                )
+                if TK_ROOT is not None:
+                    try:
+                        TK_ROOT.after(0, open_settings_dialog_window)
+                    except Exception:
+                        pass
+        except Exception:
+            time.sleep(0.4)
 
 
 def on_tray_settings(icon=None, item=None):
@@ -8474,7 +8894,7 @@ def on_tray_resync_displays(icon=None, item=None):
 
 
 def shutdown_app(icon=None, item=None):
-    global IS_RUNNING
+    global IS_RUNNING, _SINGLE_INSTANCE_MUTEX_HANDLE, _SINGLE_INSTANCE_EVENT_HANDLE
     if not IS_RUNNING:
         return
     IS_RUNNING = False
@@ -8508,6 +8928,22 @@ def shutdown_app(icon=None, item=None):
             pass
 
     cleanup_legacy_webview_profile()
+
+    if _KERNEL32_SINGLE_INST is not None:
+        if _SINGLE_INSTANCE_EVENT_HANDLE:
+            try:
+                _KERNEL32_SINGLE_INST.CloseHandle(_SINGLE_INSTANCE_EVENT_HANDLE)
+            except Exception:
+                pass
+            _SINGLE_INSTANCE_EVENT_HANDLE = None
+        if _SINGLE_INSTANCE_MUTEX_HANDLE:
+            try:
+                _KERNEL32_SINGLE_INST.ReleaseMutex(_SINGLE_INSTANCE_MUTEX_HANDLE)
+                _KERNEL32_SINGLE_INST.CloseHandle(_SINGLE_INSTANCE_MUTEX_HANDLE)
+            except Exception:
+                pass
+            _SINGLE_INSTANCE_MUTEX_HANDLE = None
+
     os._exit(0)
 
 
@@ -8596,7 +9032,7 @@ def ensure_webview_windows_for_connected_screens():
     Dynamically creates and injects pywebview windows for any newly connected monitors
     (e.g., when an HDMI TV is powered on after the application has already started).
     """
-    for screen_info in list(CONNECTED_SCREENS):
+    for screen_info in get_connected_screens_snapshot():
         sid = screen_info["id"]
         win = WEBVIEW_WINDOWS.get(sid)
         win_title = f"{WEBVIEW_WINDOW_TITLE_PREFIX}_{sid}"
@@ -8637,6 +9073,8 @@ def resync_all_displays_and_desktop(reason: str = "Display topology change"):
     hides disconnected displays, repairs parent/style/rect drift inside Progman/WorkerW, restores
     desktop icon metrics if perturbed by DPI switches, and updates the Settings dropdown live.
     """
+    if not _RESYNC_LOCK.acquire(blocking=False):
+        return
     try:
         screens = refresh_connected_screens_preserving_ids()
         summary = ", ".join(f"{s['id']}={s['width']}x{s['height']}@({s['x']},{s['y']})" for s in screens)
@@ -8663,6 +9101,8 @@ def resync_all_displays_and_desktop(reason: str = "Display topology change"):
                 pass
     except Exception as e:
         log_event("win32", f"Display topology resync warning: {e}")
+    finally:
+        _RESYNC_LOCK.release()
 
 
 def verify_and_heal_desktop_hwnds():
@@ -8683,7 +9123,7 @@ def verify_and_heal_desktop_hwnds():
     if not target_parent:
         return
 
-    screens_by_id = {s["id"]: s for s in CONNECTED_SCREENS}
+    screens_by_id = {s["id"]: s for s in get_connected_screens_snapshot()}
     needs_heal_sids = []
 
     with INJECTION_LOCK:
@@ -8944,7 +9384,7 @@ def fullscreen_monitor_worker_loop():
 
             screens_to_check = []
             disabled_fs_screens = []
-            for s in list(CONNECTED_SCREENS):
+            for s in get_connected_screens_snapshot():
                 sid = s["id"]
                 sc_cfg = get_screen_config(sid)
                 enabled = bool(sc_cfg.get("enabled", False))
@@ -9026,11 +9466,25 @@ def on_webview_started():
 
 
 if __name__ == "__main__":
-    HTTP_SERVER = ReusableThreadingHTTPServer(("127.0.0.1", PORT), ProxyHandler)
+    enforce_single_instance_or_exit()
+
+    try:
+        HTTP_SERVER = ReusableThreadingHTTPServer(("127.0.0.1", PORT), ProxyHandler)
+    except OSError as bind_err:
+        # Secondary safeguard if port 8088 is already exclusively bound
+        _signal_existing_instance_to_show_settings()
+        safe_console_print(f"[APP] Port {PORT} is already exclusively bound ({bind_err}). Exiting duplicate instance.")
+        os._exit(0)
+
     server_thread = threading.Thread(target=HTTP_SERVER.serve_forever, daemon=True)
     server_thread.start()
     transport_summary = "curl_cffi HTTP/2 + DoH" if CURL_CFFI_AVAILABLE else "stdlib TLS 1.3 + DoH SNI fallback"
     log_event("server", f"Service running on http://127.0.0.1:{PORT} ({transport_summary})")
+
+    single_instance_thread = threading.Thread(
+        target=single_instance_signal_worker_loop, daemon=True
+    )
+    single_instance_thread.start()
 
     suggestion_thread = threading.Thread(target=suggestion_worker_loop, daemon=True)
     suggestion_thread.start()
